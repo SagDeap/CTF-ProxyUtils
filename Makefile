@@ -3,6 +3,11 @@ PKG     := ./cmd/ctf-proxyutils
 VERSION := $(shell git describe --tags --always 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
+# Цели сборки. macOS и Windows тут не ради vulnbox, а на случай, когда
+# пробросить порт нужно с чьего-то ноутбука.
+PLATFORMS := linux/amd64 linux/arm64 linux/386 linux/arm \
+             darwin/amd64 darwin/arm64 windows/amd64
+
 .PHONY: all build run test vet clean dist
 
 all: build
@@ -24,13 +29,18 @@ vet:
 clean:
 	rm -rf $(BINARY) dist
 
-## dist — кросс-компиляция под всё, на чём может оказаться виртуалка.
-## Нужен официальный toolchain с go.dev: gccgo кросс-собирать не умеет.
+## dist — статические бинарники под все платформы плюс контрольные суммы.
+## Нужен официальный toolchain с go.dev: gccgo кросс-компиляцию не умеет.
+## Версия переопределяется извне: make dist VERSION=v0.1.0
 dist:
-	mkdir -p dist
-	GOOS=linux  GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-amd64   $(PKG)
-	GOOS=linux  GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-arm64   $(PKG)
-	GOOS=linux  GOARCH=386   CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-386     $(PKG)
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-darwin-arm64  $(PKG)
-	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-darwin-amd64  $(PKG)
+	@rm -rf dist && mkdir -p dist
+	@for p in $(PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; \
+		out="dist/$(BINARY)-$$os-$$arch"; \
+		if [ "$$os" = "windows" ]; then out="$$out.exe"; fi; \
+		echo "  сборка $$os/$$arch"; \
+		GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 \
+			go build -ldflags "$(LDFLAGS)" -o "$$out" $(PKG) || exit 1; \
+	done
+	@cd dist && sha256sum * > checksums.txt
 	@echo "готово:" && ls -lh dist/

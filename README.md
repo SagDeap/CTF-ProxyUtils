@@ -1,5 +1,8 @@
 # CTF-ProxyUtils
 
+[![Релиз](https://img.shields.io/github/v/release/SagDeap/CTF-ProxyUtils?label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7)](https://github.com/SagDeap/CTF-ProxyUtils/releases/latest)
+[![Лицензия](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-blue)](LICENSE)
+
 Утилита для Attack/Defense CTF: найти машины команды в локальной сети и
 пробросить на них порты с боевой виртуалки — без ручной возни с `socat`,
 `iptables` и SSH-туннелями, когда всё горит.
@@ -33,16 +36,50 @@
   текстом. На A/D это готовый сборник чужих эксплойтов.
 - **Защита панели** — токен доступа, по умолчанию слушает только `127.0.0.1`.
 
-## Сборка
+## Установка
+
+Готовые бинарники — в [releases](https://github.com/SagDeap/CTF-ProxyUtils/releases/latest).
+Они статические: ни Go, ни библиотек на виртуалке не нужно.
+
+```sh
+curl -LO https://github.com/SagDeap/CTF-ProxyUtils/releases/latest/download/ctf-proxyutils-linux-amd64
+chmod +x ctf-proxyutils-linux-amd64
+./ctf-proxyutils-linux-amd64
+```
+
+Ссылка `latest/download/…` всегда указывает на свежую версию, так что команду
+можно держать в шпаргалке команды и не править от соревнования к соревнованию.
+
+Собраны варианты под `linux` (amd64, arm64, 386, arm), `darwin` (amd64, arm64)
+и `windows` (amd64). Контрольные суммы — в `checksums.txt` рядом с бинарниками:
+
+```sh
+sha256sum -c checksums.txt --ignore-missing
+```
+
+## Сборка из исходников
 
 ```sh
 make build       # ./ctf-proxyutils под текущую систему
-make dist        # бинарники под linux/amd64, arm64, 386, macOS
+make dist        # статические бинарники под все платформы + checksums.txt
 make test        # тесты
 ```
 
 Требуется Go 1.18+. Для `make dist` нужен официальный toolchain с go.dev —
 gccgo кросс-компиляцию не поддерживает.
+
+### Как выпускается релиз
+
+Сборкой занимается GitHub Actions: тег вида `v*` запускает
+[workflow](.github/workflows/release.yml), который прогоняет тесты, собирает
+все платформы и публикует релиз с файлами.
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Собрать релиз можно и вручную — вкладка **Actions** → **Релиз** → **Run workflow**.
 
 ## Запуск
 

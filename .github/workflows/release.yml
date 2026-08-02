@@ -1,0 +1,65 @@
+name: Релиз
+
+# Релиз собирается по тегу вида v0.1.0:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags:
+      - 'v*'
+  # Позволяет собрать релиз вручную из вкладки Actions.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Тег для релиза (например v0.1.0)'
+        required: true
+
+permissions:
+  contents: write # нужно, чтобы создать релиз и приложить файлы
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Проверки
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      - name: Определить версию
+        id: ver
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Собрать бинарники
+        run: make dist VERSION=${{ steps.ver.outputs.tag }}
+
+      - name: Подготовить описание
+        run: |
+          cat > notes.md <<'NOTES'
+          Утилита для Attack/Defense CTF: найти машины команды в локальной сети
+          и пробросить на них порты с боевой виртуалки.
+
+          Скачайте бинарник под нужную систему — он статический, зависимостей нет.
+
+          ```sh
+          curl -LO https://github.com/${{ github.repository }}/releases/latest/download/ctf-proxyutils-linux-amd64
+          chmod +x ctf-proxyutils-linux-amd64
+          ./ctf-proxyutils-linux-amd64
+          ```
+
+          Токен доступа и ссылка на панель печатаются при запуске.
+          Контрольные суммы — в `checksums.txt`.
+          NOTES
+
+      - name: Создать релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" dist/* \
+            --title "CTF-ProxyUtils ${{ steps.ver.outputs.tag }}" \
+            --notes-file notes.md
