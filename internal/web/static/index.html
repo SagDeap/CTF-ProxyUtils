@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTF-ProxyUtils</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- Экран входа -->
+<div id="login" class="login hidden">
+  <form class="login-box" id="login-form">
+    <div class="login-logo">CTF<span>·</span>ProxyUtils</div>
+    <p class="login-hint">Токен показан в консоли при запуске утилиты</p>
+    <input type="password" id="login-token" placeholder="токен доступа" autocomplete="current-password" autofocus>
+    <button type="submit" class="btn btn-primary">Войти</button>
+    <div class="login-error" id="login-error"></div>
+  </form>
+</div>
+
+<!-- Основное приложение -->
+<div id="app" class="hidden">
+  <header class="topbar">
+    <div class="logo">CTF<span>·</span>ProxyUtils</div>
+    <nav class="tabs">
+      <button class="tab active" data-tab="rules">Пробросы <span class="badge" id="badge-rules">0</span></button>
+      <button class="tab" data-tab="scan">Сканер сети</button>
+      <button class="tab" data-tab="traffic">Трафик</button>
+    </nav>
+    <div class="sysinfo">
+      <span id="sys-host" title="имя машины"></span>
+      <span class="dot" id="conn-dot" title="связь с утилитой"></span>
+    </div>
+  </header>
+
+  <main>
+    <!-- ── Пробросы ───────────────────────────────────────────── -->
+    <section id="tab-rules" class="tab-panel active">
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btn-new-rule">+ Новый проброс</button>
+        <div class="totals" id="rules-totals"></div>
+      </div>
+      <div id="rules-list" class="rules"></div>
+      <div class="empty hidden" id="rules-empty">
+        <p>Пробросов пока нет.</p>
+        <p class="dim">Нажмите «Новый проброс» или найдите машину во вкладке «Сканер сети» —
+           оттуда правило создаётся в один клик.</p>
+      </div>
+    </section>
+
+    <!-- ── Сканер ─────────────────────────────────────────────── -->
+    <section id="tab-scan" class="tab-panel">
+      <form class="scan-form" id="scan-form">
+        <div class="field">
+          <label>Подсеть</label>
+          <input type="text" id="scan-cidr" placeholder="192.168.0.0/24" list="cidr-list">
+          <datalist id="cidr-list"></datalist>
+        </div>
+        <div class="field grow">
+          <label>Порты</label>
+          <input type="text" id="scan-ports" placeholder="пусто = типовой набор">
+        </div>
+        <div class="field narrow">
+          <label>Таймаут, мс</label>
+          <input type="number" id="scan-timeout" value="500" min="50" max="10000">
+        </div>
+        <div class="field narrow">
+          <label>Потоки</label>
+          <input type="number" id="scan-conc" value="256" min="1" max="2048">
+        </div>
+        <label class="check">
+          <input type="checkbox" id="scan-fp" checked> определять сервисы
+        </label>
+        <button type="submit" class="btn btn-primary" id="btn-scan">Сканировать</button>
+        <button type="button" class="btn btn-ghost hidden" id="btn-scan-stop">Стоп</button>
+      </form>
+      <div class="quick-ports">
+        <span class="dim">Быстрый выбор:</span>
+        <button type="button" class="chip" data-ports="">типовые</button>
+        <button type="button" class="chip" id="chip-ctf">порты CTF</button>
+        <button type="button" class="chip" data-ports="1-1024">1-1024</button>
+        <button type="button" class="chip" data-ports="7010">7010</button>
+      </div>
+
+      <div class="progress hidden" id="scan-progress">
+        <div class="progress-bar"><div class="progress-fill" id="scan-fill"></div></div>
+        <div class="progress-text" id="scan-text"></div>
+      </div>
+
+      <div id="scan-results" class="scan-results"></div>
+      <div class="empty hidden" id="scan-empty">
+        <p>Ничего не найдено.</p>
+        <p class="dim">Попробуйте увеличить таймаут или расширить список портов.</p>
+      </div>
+    </section>
+
+    <!-- ── Трафик ─────────────────────────────────────────────── -->
+    <section id="tab-traffic" class="tab-panel">
+      <div class="toolbar">
+        <select id="traffic-rule" class="select"></select>
+        <button class="btn btn-ghost" id="btn-traffic-refresh">Обновить</button>
+        <button class="btn btn-ghost" id="btn-traffic-clear">Очистить</button>
+        <label class="check"><input type="checkbox" id="traffic-auto"> автообновление</label>
+      </div>
+      <div id="traffic-list" class="traffic"></div>
+      <div class="empty hidden" id="traffic-empty">
+        <p>Записей нет.</p>
+        <p class="dim">Включите «запись трафика» в настройках правила — тогда всё,
+           что через него пройдёт, окажется здесь.</p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Модальное окно правила -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h2 id="modal-title">Новый проброс</h2>
+      <button class="modal-close" id="modal-close">&times;</button>
+    </div>
+    <form id="rule-form">
+      <div class="field">
+        <label>Название</label>
+        <input type="text" id="f-name" placeholder="например: сервис на ноуте Пети">
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label>Слушать на</label>
+          <input type="text" id="f-listen-host" value="0.0.0.0">
+        </div>
+        <div class="field narrow">
+          <label>Порт</label>
+          <input type="number" id="f-listen-port" min="1" max="65535" required>
+        </div>
+        <div class="arrow">→</div>
+        <div class="field">
+          <label>Куда слать</label>
+          <input type="text" id="f-target-host" placeholder="192.168.0.5" required>
+        </div>
+        <div class="field narrow">
+          <label>Порт</label>
+          <input type="number" id="f-target-port" min="1" max="65535" required>
+        </div>
+      </div>
+
+      <details class="section">
+        <summary>Резерв и проверка живости</summary>
+        <label class="check">
+          <input type="checkbox" id="f-health"> проверять, жив ли адрес назначения
+        </label>
+        <div class="row">
+          <div class="field narrow">
+            <label>Интервал, с</label>
+            <input type="number" id="f-health-interval" value="3" min="1" max="600">
+          </div>
+          <div class="field narrow">
+            <label>Таймаут, мс</label>
+            <input type="number" id="f-health-timeout" value="1000" min="50" max="10000">
+          </div>
+          <div class="field narrow">
+            <label>Порог отказа</label>
+            <input type="number" id="f-health-fail" value="2" min="1" max="20">
+          </div>
+          <div class="field narrow">
+            <label>Порог возврата</label>
+            <input type="number" id="f-health-rise" value="2" min="1" max="20">
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Резервный адрес</label>
+            <input type="text" id="f-backup-host" placeholder="не задан">
+          </div>
+          <div class="field narrow">
+            <label>Порт</label>
+            <input type="number" id="f-backup-port" min="1" max="65535">
+          </div>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="f-autofail" checked> уходить на резерв, если основной лёг
+        </label>
+        <label class="check">
+          <input type="checkbox" id="f-autoback" checked> возвращаться, когда основной ожил
+        </label>
+      </details>
+
+      <details class="section">
+        <summary>Запись трафика</summary>
+        <label class="check">
+          <input type="checkbox" id="f-dump"> писать всё, что проходит через правило
+        </label>
+        <div class="row">
+          <div class="field narrow">
+            <label>Соединений</label>
+            <input type="number" id="f-dump-conns" value="50" min="1" max="2000">
+          </div>
+          <div class="field narrow">
+            <label>КБ на соединение</label>
+            <input type="number" id="f-dump-kb" value="64" min="1" max="4096">
+          </div>
+        </div>
+        <p class="hint">Память под запись ограничена сверху: соединений × КБ × 2 направления.</p>
+      </details>
+
+      <details class="section">
+        <summary>Ограничения</summary>
+        <div class="field">
+          <label>Белый список (через запятую)</label>
+          <input type="text" id="f-acl" placeholder="пусто = принимать всех; например 10.0.0.0/8, 192.168.0.5">
+        </div>
+        <div class="row">
+          <div class="field narrow">
+            <label>Макс. соединений</label>
+            <input type="number" id="f-maxconns" value="0" min="0">
+          </div>
+          <div class="field narrow">
+            <label>Простой, с</label>
+            <input type="number" id="f-idle" value="0" min="0">
+          </div>
+          <div class="field narrow">
+            <label>Таймаут связи, мс</label>
+            <input type="number" id="f-dial" value="3000" min="100" max="60000">
+          </div>
+        </div>
+        <p class="hint">0 = без ограничения.</p>
+      </details>
+
+      <label class="check">
+        <input type="checkbox" id="f-enabled" checked> включить сразу
+      </label>
+
+      <div class="modal-error hidden" id="modal-error"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btn-cancel">Отмена</button>
+        <button type="submit" class="btn btn-primary" id="btn-save">Сохранить</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
