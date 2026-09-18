@@ -4,24 +4,25 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"sort"
 	"sync"
+	"time"
 )
 
-// Manager владеет набором правил и следит за их запуском/остановкой.
+// Manager serializes mutations without holding its read lock across network
+// shutdown. Readers and the configuration callback remain free to take snapshots.
 type Manager struct {
+	opMu     sync.Mutex
 	mu       sync.RWMutex
 	rules    map[string]*Rule
 	order    []string
 	onChange func()
+	journal  eventJournal
 }
 
-func NewManager() *Manager {
-	return &Manager{rules: make(map[string]*Rule)}
-}
+func NewManager() *Manager { return &Manager{rules: make(map[string]*Rule)} }
 
-// SetOnChange вешает колбэк, который дёргается после любого изменения набора
-// правил — им наружный код сохраняет конфиг на диск.
 func (m *Manager) SetOnChange(fn func()) {
 	m.mu.Lock()
 	m.onChange = fn
@@ -40,25 +41,22 @@ func (m *Manager) notify() {
 func newID() string {
 	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("r%d", len(b))
+		return fmt.Sprintf("r%x", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
 }
 
-// checkPortConflict ищет другое правило, которое уже слушает тот же адрес.
-// Вызывать под m.mu.
 func (m *Manager) checkPortConflictLocked(spec RuleSpec, excludeID string) error {
-	for id, r := range m.rules {
+	for id, rule := range m.rules {
 		if id == excludeID {
 			continue
 		}
-		other := r.Spec()
+		other := rule.Spec()
 		if other.ListenPort != spec.ListenPort {
 			continue
 		}
-		// 0.0.0.0 конфликтует с любым адресом на том же порту.
-		if other.ListenHost == spec.ListenHost ||
-			other.ListenHost == "0.0.0.0" || spec.ListenHost == "0.0.0.0" {
+		left, right := net.ParseIP(other.ListenHost), net.ParseIP(spec.ListenHost)
+		if other.ListenHost == spec.ListenHost || (left != nil && left.IsUnspecified()) || (right != nil && right.IsUnspecified()) || (left != nil && right != nil && left.Equal(right)) {
 			name := other.Name
 			if name == "" {
 				name = other.ID
@@ -69,8 +67,18 @@ func (m *Manager) checkPortConflictLocked(spec RuleSpec, excludeID string) error
 	return nil
 }
 
-// Add создаёт правило и, если оно включено, сразу его поднимает.
 func (m *Manager) Add(spec RuleSpec) (*Rule, error) {
+	m.opMu.Lock()
+	rule, err := m.addLocked(spec)
+	m.opMu.Unlock()
+	if rule != nil {
+		m.notify()
+	}
+	return rule, err
+}
+
+func (m *Manager) addLocked(spec RuleSpec) (*Rule, error) {
+	spec = spec.Clone()
 	if spec.ID == "" {
 		spec.ID = newID()
 	}
@@ -78,7 +86,6 @@ func (m *Manager) Add(spec RuleSpec) (*Rule, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
 	}
-
 	m.mu.Lock()
 	if _, exists := m.rules[spec.ID]; exists {
 		m.mu.Unlock()
@@ -88,40 +95,41 @@ func (m *Manager) Add(spec RuleSpec) (*Rule, error) {
 		m.mu.Unlock()
 		return nil, err
 	}
-	r, err := newRule(spec)
+	rule, err := newRule(spec)
 	if err != nil {
 		m.mu.Unlock()
 		return nil, err
 	}
-	m.rules[spec.ID] = r
+	rule.event = m.journal.add
+	m.rules[spec.ID] = rule
 	m.order = append(m.order, spec.ID)
 	m.mu.Unlock()
-
+	rule.emit("created", "Правило создано")
 	if spec.Enabled {
-		if err := r.Start(); err != nil {
-			// Правило остаётся в списке, но выключенным — пользователь увидит ошибку.
-			r.mu.Lock()
-			r.spec.Enabled = false
-			r.mu.Unlock()
-			m.notify()
-			return r, err
+		if err := rule.Start(); err != nil {
+			rule.mu.Lock()
+			rule.spec.Enabled = false
+			rule.mu.Unlock()
+			return rule, err
 		}
 	}
-	m.notify()
-	return r, nil
+	return rule, nil
 }
 
-// Update меняет конфигурацию существующего правила. Слушатель перезапускается
-// только если изменилось то, что на него влияет, — статистика и дампы при
-// правке мелочей не теряются.
 func (m *Manager) Update(id string, spec RuleSpec) error {
-	m.mu.RLock()
-	r, ok := m.rules[id]
-	m.mu.RUnlock()
+	m.opMu.Lock()
+	err := m.updateLocked(id, spec)
+	m.opMu.Unlock()
+	m.notify()
+	return err
+}
+
+func (m *Manager) updateLocked(id string, spec RuleSpec) error {
+	rule, ok := m.Get(id)
 	if !ok {
 		return fmt.Errorf("правило %s не найдено", id)
 	}
-
+	spec = spec.Clone()
 	spec.ID = id
 	spec.applyDefaults()
 	if err := spec.Validate(); err != nil {
@@ -131,95 +139,139 @@ func (m *Manager) Update(id string, spec RuleSpec) error {
 	if err != nil {
 		return err
 	}
-
-	m.mu.Lock()
-	if err := m.checkPortConflictLocked(spec, id); err != nil {
-		m.mu.Unlock()
+	m.mu.RLock()
+	err = m.checkPortConflictLocked(spec, id)
+	m.mu.RUnlock()
+	if err != nil {
 		return err
 	}
-	m.mu.Unlock()
-
-	old := r.Spec()
-	wasRunning := r.Snapshot().Running
-	needRestart := old.ListenAddr() != spec.ListenAddr() ||
-		old.Health.Enabled != spec.Health.Enabled ||
-		old.Health.IntervalSec != spec.Health.IntervalSec
-
-	if wasRunning && (needRestart || !spec.Enabled) {
-		r.Stop()
+	rule.lifeMu.Lock()
+	defer rule.lifeMu.Unlock()
+	old := rule.Spec()
+	wasRunning := rule.Snapshot().Running
+	needListener := spec.Enabled && (!wasRunning || old.ListenAddr() != spec.ListenAddr())
+	stoppedOld := false
+	var candidate net.Listener
+	// Bind before changing configuration or trimming captures. When old and new
+	// bindings overlap on the same port, retry after Stop and restore on failure.
+	restore := func(cause error) error {
+		if candidate != nil {
+			candidate.Close()
+		}
+		if stoppedOld {
+			if rollbackErr := rule.startLocked(nil); rollbackErr != nil {
+				rule.mu.Lock()
+				rule.spec.Enabled = false
+				rule.mu.Unlock()
+				cause = fmt.Errorf("%v; восстановить прежний слушатель не удалось: %w", cause, rollbackErr)
+			}
+		}
+		rule.emit("update_failed", cause.Error())
+		return cause
 	}
-
-	r.mu.Lock()
-	r.spec = spec
-	r.acl = acl
-	// Если резерв убрали, нельзя остаться на нём висеть.
-	if spec.Backup == nil || spec.Backup.IsZero() {
-		r.usingBackup = false
-	}
-	r.mu.Unlock()
-	r.rec.Resize(spec.Dump.MaxConns, spec.Dump.MaxBytesPer)
-
-	if spec.Enabled && (!wasRunning || needRestart) {
-		if err := r.Start(); err != nil {
-			r.mu.Lock()
-			r.spec.Enabled = false
-			r.mu.Unlock()
-			m.notify()
-			return err
+	if needListener {
+		candidate, err = net.Listen("tcp", spec.ListenAddr())
+		if err != nil && wasRunning && old.ListenPort == spec.ListenPort {
+			rule.stopLocked()
+			stoppedOld = true
+			candidate, err = net.Listen("tcp", spec.ListenAddr())
+		}
+		if err != nil {
+			return restore(fmt.Errorf("не удалось занять %s: %w", spec.ListenAddr(), err))
 		}
 	}
-	m.notify()
+	if err := rule.rec.Resize(spec.Dump.MaxConns, spec.Dump.MaxBytesPer); err != nil {
+		return restore(err)
+	}
+	if wasRunning && (!spec.Enabled || needListener) && !stoppedOld {
+		rule.stopLocked()
+	}
+	rule.stopHealthLocked()
+	rule.mu.Lock()
+	rule.spec, rule.acl = spec, acl
+	if old.Target != spec.Target {
+		rule.targetUp = true
+		rule.failStreak, rule.riseStreak = 0, 0
+	}
+	if !sameEndpoint(old.Backup, spec.Backup) {
+		rule.backupUp = true
+		rule.bkFailStrk, rule.bkRiseStrk = 0, 0
+	}
+	rule.decideFailoverLocked()
+	rule.emitLocked("updated", "Настройки правила обновлены")
+	rule.mu.Unlock()
+	if needListener {
+		return rule.startLocked(candidate)
+	}
+	if spec.Enabled {
+		rule.startHealthLocked()
+	}
 	return nil
 }
 
-// SetEnabled включает или выключает правило.
+func sameEndpoint(left, right *Endpoint) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
 func (m *Manager) SetEnabled(id string, enabled bool) error {
-	m.mu.RLock()
-	r, ok := m.rules[id]
-	m.mu.RUnlock()
+	m.opMu.Lock()
+	rule, ok := m.Get(id)
+	var err error
 	if !ok {
-		return fmt.Errorf("правило %s не найдено", id)
-	}
-
-	if enabled {
-		r.mu.Lock()
-		r.spec.Enabled = true
-		r.mu.Unlock()
-		if err := r.Start(); err != nil {
-			r.mu.Lock()
-			r.spec.Enabled = false
-			r.mu.Unlock()
-			m.notify()
-			return err
-		}
+		err = fmt.Errorf("правило %s не найдено", id)
 	} else {
-		r.Stop()
-		r.mu.Lock()
-		r.spec.Enabled = false
-		r.mu.Unlock()
+		spec := rule.Spec()
+		spec.Enabled = enabled
+		err = m.updateLocked(id, spec)
 	}
+	m.opMu.Unlock()
 	m.notify()
-	return nil
+	return err
 }
 
-// Delete останавливает и убирает правило.
+func (m *Manager) SetRoutingMode(id, mode string) error {
+	m.opMu.Lock()
+	rule, ok := m.Get(id)
+	var err error
+	if !ok {
+		err = fmt.Errorf("правило %s не найдено", id)
+	} else {
+		rule.lifeMu.Lock()
+		rule.mu.Lock()
+		err = rule.setRoutingModeLocked(mode)
+		rule.mu.Unlock()
+		rule.lifeMu.Unlock()
+	}
+	m.opMu.Unlock()
+	if err == nil {
+		m.notify()
+	}
+	return err
+}
+
 func (m *Manager) Delete(id string) error {
+	m.opMu.Lock()
 	m.mu.Lock()
-	r, ok := m.rules[id]
+	rule, ok := m.rules[id]
 	if !ok {
 		m.mu.Unlock()
+		m.opMu.Unlock()
 		return fmt.Errorf("правило %s не найдено", id)
 	}
 	delete(m.rules, id)
-	for i, oid := range m.order {
-		if oid == id {
+	for i, candidate := range m.order {
+		if candidate == id {
 			m.order = append(m.order[:i], m.order[i+1:]...)
 			break
 		}
 	}
 	m.mu.Unlock()
-
-	r.Stop()
+	rule.Stop()
+	rule.emit("deleted", "Правило удалено")
+	m.opMu.Unlock()
 	m.notify()
 	return nil
 }
@@ -227,98 +279,68 @@ func (m *Manager) Delete(id string) error {
 func (m *Manager) Get(id string) (*Rule, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	r, ok := m.rules[id]
-	return r, ok
+	rule, ok := m.rules[id]
+	return rule, ok
 }
 
-// List отдаёт правила в порядке добавления.
 func (m *Manager) List() []*Rule {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := make([]*Rule, 0, len(m.rules))
+	result := make([]*Rule, 0, len(m.rules))
 	for _, id := range m.order {
-		if r, ok := m.rules[id]; ok {
-			out = append(out, r)
+		if rule, ok := m.rules[id]; ok {
+			result = append(result, rule)
 		}
 	}
-	return out
+	return result
 }
 
 func (m *Manager) Snapshots() []Snapshot {
 	rules := m.List()
-	out := make([]Snapshot, 0, len(rules))
-	for _, r := range rules {
-		out = append(out, r.Snapshot())
+	result := make([]Snapshot, 0, len(rules))
+	for _, rule := range rules {
+		result = append(result, rule.Snapshot())
 	}
-	return out
+	return result
 }
 
-// Specs отдаёт конфигурацию всех правил — то, что уходит в config.json.
 func (m *Manager) Specs() []RuleSpec {
 	rules := m.List()
-	out := make([]RuleSpec, 0, len(rules))
-	for _, r := range rules {
-		out = append(out, r.Spec())
+	result := make([]RuleSpec, 0, len(rules))
+	for _, rule := range rules {
+		result = append(result, rule.Spec())
 	}
-	return out
+	return result
 }
 
-// LoadSpecs поднимает набор правил из конфига. Ошибки по отдельным правилам
-// собираются в список, остальные всё равно стартуют: одно битое правило не
-// должно ронять весь проброс.
+// LoadSpecs does not notify on individual rules: a save midway through loading
+// must not overwrite the rest of the configuration. Duplicate IDs are rejected.
 func (m *Manager) LoadSpecs(specs []RuleSpec) []error {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	var errs []error
 	for _, spec := range specs {
-		if spec.ID == "" {
-			spec.ID = newID()
-		}
-		spec.applyDefaults()
-		if err := spec.Validate(); err != nil {
+		if _, err := m.addLocked(spec); err != nil {
 			errs = append(errs, fmt.Errorf("правило %s: %w", spec.Name, err))
-			continue
-		}
-		m.mu.Lock()
-		if err := m.checkPortConflictLocked(spec, ""); err != nil {
-			m.mu.Unlock()
-			errs = append(errs, fmt.Errorf("правило %s: %w", spec.Name, err))
-			continue
-		}
-		r, err := newRule(spec)
-		if err != nil {
-			m.mu.Unlock()
-			errs = append(errs, fmt.Errorf("правило %s: %w", spec.Name, err))
-			continue
-		}
-		m.rules[spec.ID] = r
-		m.order = append(m.order, spec.ID)
-		m.mu.Unlock()
-
-		if spec.Enabled {
-			if err := r.Start(); err != nil {
-				r.mu.Lock()
-				r.spec.Enabled = false
-				r.mu.Unlock()
-				errs = append(errs, err)
-			}
 		}
 	}
 	return errs
 }
 
-// StopAll гасит все правила — вызывается при завершении процесса.
 func (m *Manager) StopAll() {
-	for _, r := range m.List() {
-		r.Stop()
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	for _, rule := range m.List() {
+		rule.Stop()
 	}
 }
 
-// UsedPorts — какие локальные порты уже заняты правилами (для подсказок в UI).
 func (m *Manager) UsedPorts() []int {
 	rules := m.List()
-	out := make([]int, 0, len(rules))
-	for _, r := range rules {
-		out = append(out, r.Spec().ListenPort)
+	result := make([]int, 0, len(rules))
+	for _, rule := range rules {
+		result = append(result, rule.Spec().ListenPort)
 	}
-	sort.Ints(out)
-	return out
+	sort.Ints(result)
+	return result
 }

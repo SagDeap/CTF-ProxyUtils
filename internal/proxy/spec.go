@@ -31,10 +31,10 @@ func (e Endpoint) String() string {
 // HealthSpec описывает, как проверять живость таргета.
 type HealthSpec struct {
 	Enabled     bool `json:"enabled"`
-	IntervalSec int  `json:"interval_sec"` // как часто проверять
-	TimeoutMS   int  `json:"timeout_ms"`   // таймаут одной проверки
-	FailAfter   int  `json:"fail_after"`   // сколько подряд неудач до пометки down
-	RiseAfter   int  `json:"rise_after"`   // сколько подряд успехов до возврата в up
+	IntervalSec int  `json:"interval_sec"`  // как часто проверять
+	TimeoutMS   int  `json:"timeout_ms"`    // таймаут одной проверки
+	FailAfter   int  `json:"fail_after"`    // сколько подряд неудач до пометки down
+	RiseAfter   int  `json:"rise_after"`    // сколько подряд успехов до возврата в up
 	AutoFail    bool `json:"auto_failover"` // переключаться на backup автоматически
 	AutoBack    bool `json:"auto_failback"` // возвращаться на основной, когда он ожил
 }
@@ -73,15 +73,16 @@ func (d *DumpSpec) applyDefaults() {
 // RuleSpec — сериализуемая конфигурация одного проброса. Всё, что попадает
 // в config.json, лежит здесь; рантайм-состояние живёт в Rule.
 type RuleSpec struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	Enabled    bool       `json:"enabled"`
-	ListenHost string     `json:"listen_host"`
-	ListenPort int        `json:"listen_port"`
-	Target     Endpoint   `json:"target"`
-	Backup     *Endpoint  `json:"backup,omitempty"`
-	Health     HealthSpec `json:"health"`
-	Dump       DumpSpec   `json:"dump"`
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Enabled     bool       `json:"enabled"`
+	ListenHost  string     `json:"listen_host"`
+	ListenPort  int        `json:"listen_port"`
+	Target      Endpoint   `json:"target"`
+	Backup      *Endpoint  `json:"backup,omitempty"`
+	Health      HealthSpec `json:"health"`
+	Dump        DumpSpec   `json:"dump"`
+	RoutingMode string     `json:"routing_mode"` // auto, primary, backup
 
 	// AllowCIDR — если непусто, принимаются только клиенты из этих подсетей.
 	AllowCIDR []string `json:"allow_cidr,omitempty"`
@@ -94,6 +95,9 @@ type RuleSpec struct {
 }
 
 func (s *RuleSpec) applyDefaults() {
+	if s.RoutingMode == "" {
+		s.RoutingMode = "auto"
+	}
 	if s.ListenHost == "" {
 		s.ListenHost = "0.0.0.0"
 	}
@@ -104,6 +108,16 @@ func (s *RuleSpec) applyDefaults() {
 	s.Dump.applyDefaults()
 }
 
+// Clone detaches mutable fields from the configuration owned by a rule.
+func (s RuleSpec) Clone() RuleSpec {
+	s.AllowCIDR = append([]string(nil), s.AllowCIDR...)
+	if s.Backup != nil {
+		backup := *s.Backup
+		s.Backup = &backup
+	}
+	return s
+}
+
 // ListenAddr — адрес, который слушает правило.
 func (s RuleSpec) ListenAddr() string {
 	return net.JoinHostPort(s.ListenHost, strconv.Itoa(s.ListenPort))
@@ -111,6 +125,18 @@ func (s RuleSpec) ListenAddr() string {
 
 // Validate проверяет спеку до того, как ей дадут поднять слушатель.
 func (s *RuleSpec) Validate() error {
+	if s.RoutingMode != "" && s.RoutingMode != "auto" && s.RoutingMode != "primary" && s.RoutingMode != "backup" {
+		return fmt.Errorf("режим маршрутизации должен быть auto, primary или backup")
+	}
+	if s.RoutingMode == "backup" && (s.Backup == nil || s.Backup.IsZero()) {
+		return fmt.Errorf("для режима backup нужен резервный адрес")
+	}
+	if s.MaxConns < 0 || s.IdleTimeoutSec < 0 {
+		return fmt.Errorf("лимит соединений и таймаут простоя не могут быть отрицательными")
+	}
+	if s.Dump.MaxConns > 2000 || s.Dump.MaxBytesPer > 4*1024*1024 || int64(s.Dump.MaxConns)*int64(s.Dump.MaxBytesPer)*2 > 256*1024*1024 {
+		return fmt.Errorf("лимит дампов: до 2000 соединений, до 4 МиБ на направление и до 256 МиБ данных на правило")
+	}
 	if s.ListenPort < 1 || s.ListenPort > 65535 {
 		return fmt.Errorf("порт прослушивания %d вне диапазона 1-65535", s.ListenPort)
 	}
@@ -128,12 +154,22 @@ func (s *RuleSpec) Validate() error {
 	if strings.TrimSpace(s.Target.Host) == "" {
 		return fmt.Errorf("пустой хост назначения")
 	}
+	if s.loopsToSelf(s.Target) {
+		return fmt.Errorf("адрес назначения совпадает со слушателем прокси")
+	}
 	if s.Backup != nil && !s.Backup.IsZero() {
+		if s.loopsToSelf(*s.Backup) {
+			return fmt.Errorf("резервный адрес совпадает со слушателем прокси")
+		}
 		if s.Backup.Port < 1 || s.Backup.Port > 65535 {
 			return fmt.Errorf("порт резервного адреса %d вне диапазона 1-65535", s.Backup.Port)
 		}
 	}
 	for _, c := range s.AllowCIDR {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
 		if _, _, err := net.ParseCIDR(c); err != nil {
 			// Разрешаем и голый IP — превратим его в /32 при компиляции ACL.
 			if net.ParseIP(c) == nil {
@@ -142,6 +178,41 @@ func (s *RuleSpec) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Recognize local addresses without DNS: host aliases and indirect cycles require
+// an operator check, but literal self-loops must never consume all proxy slots.
+func (s RuleSpec) loopsToSelf(endpoint Endpoint) bool {
+	if endpoint.Port != s.ListenPort {
+		return false
+	}
+	listen := net.ParseIP(s.ListenHost)
+	if listen == nil {
+		listen = net.IPv4zero
+	}
+	target := net.ParseIP(endpoint.Host)
+	if strings.EqualFold(strings.TrimSuffix(endpoint.Host, "."), "localhost") {
+		return listen.IsUnspecified() || listen.IsLoopback()
+	}
+	if target == nil {
+		return false
+	}
+	if listen.Equal(target) {
+		return true
+	}
+	if !listen.IsUnspecified() {
+		return false
+	}
+	if target.IsLoopback() || target.IsUnspecified() {
+		return true
+	}
+	addresses, _ := net.InterfaceAddrs()
+	for _, address := range addresses {
+		if local, ok := address.(*net.IPNet); ok && local.IP.Equal(target) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseACL превращает список CIDR/IP в набор подсетей.

@@ -64,8 +64,8 @@ type State struct {
 	Running    bool      `json:"running"`
 	CIDR       string    `json:"cidr,omitempty"`
 	Ports      string    `json:"ports,omitempty"`
-	Total      int       `json:"total"`
-	Done       int       `json:"done"`
+	Total      int64     `json:"total"`
+	Done       int64     `json:"done"`
 	StartedAt  time.Time `json:"started_at,omitempty"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`
 	Hosts      []Host    `json:"hosts"`
@@ -75,14 +75,15 @@ type State struct {
 // Scanner держит состояние текущего/последнего скана. Одновременно
 // выполняется только один — параллельные сканы только мешали бы друг другу.
 type Scanner struct {
+	// Keep 64-bit atomic counters aligned on 32-bit targets.
+	total   int64
+	done    int64
 	mu      sync.Mutex
 	running bool
 	cancel  context.CancelFunc
 
 	cidr      string
 	portsSpec string
-	total     int32
-	done      int32
 	startedAt time.Time
 	finished  time.Time
 	hosts     map[string]*Host
@@ -121,8 +122,8 @@ func (s *Scanner) Start(opts Options) error {
 	s.startedAt = time.Now()
 	s.finished = time.Time{}
 	s.errMsg = ""
-	atomic.StoreInt32(&s.total, int32(len(ips)*len(ports)))
-	atomic.StoreInt32(&s.done, 0)
+	atomic.StoreInt64(&s.total, int64(len(ips))*int64(len(ports)))
+	atomic.StoreInt64(&s.done, 0)
 	s.mu.Unlock()
 
 	go s.run(ctx, ips, ports, opts)
@@ -166,7 +167,7 @@ func (s *Scanner) run(ctx context.Context, ips []string, ports []int, opts Optio
 				defer wg.Done()
 				defer func() { <-sem }()
 				s.probe(ctx, ip, port, timeout, opts.Fingerprint)
-				atomic.AddInt32(&s.done, 1)
+				atomic.AddInt64(&s.done, 1)
 			}(ip, port)
 		}
 	}
@@ -187,6 +188,15 @@ func (s *Scanner) probe(ctx context.Context, ip string, port int, timeout time.D
 		return
 	}
 	defer conn.Close()
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-finished:
+		}
+	}()
 
 	res := PortResult{Port: port}
 	if fp {
@@ -292,7 +302,9 @@ func (s *Scanner) State() State {
 
 	hosts := make([]Host, 0, len(s.hosts))
 	for _, h := range s.hosts {
-		hosts = append(hosts, *h)
+		cp := *h
+		cp.Ports = append([]PortResult(nil), h.Ports...)
+		hosts = append(hosts, cp)
 	}
 	sort.Slice(hosts, func(i, j int) bool {
 		return ipLess(hosts[i].IP, hosts[j].IP)
@@ -302,8 +314,8 @@ func (s *Scanner) State() State {
 		Running:    s.running,
 		CIDR:       s.cidr,
 		Ports:      s.portsSpec,
-		Total:      int(atomic.LoadInt32(&s.total)),
-		Done:       int(atomic.LoadInt32(&s.done)),
+		Total:      atomic.LoadInt64(&s.total),
+		Done:       atomic.LoadInt64(&s.done),
 		StartedAt:  s.startedAt,
 		FinishedAt: s.finished,
 		Hosts:      hosts,
@@ -334,10 +346,11 @@ func expandCIDR(cidr string) ([]string, error) {
 	}
 
 	ones, bits := ipnet.Mask.Size()
-	size := 1 << uint(bits-ones)
-	if size > maxHosts {
+	size64 := uint64(1) << uint(bits-ones)
+	if size64 > maxHosts {
 		return nil, fmt.Errorf("подсеть /%d слишком большая — максимум %d адресов", ones, maxHosts)
 	}
+	size := int(size64)
 
 	base := binary.BigEndian.Uint32(ipnet.IP.To4())
 	out := make([]string, 0, size)

@@ -20,16 +20,16 @@ import (
 	"github.com/SagDeap/CTF-ProxyUtils/internal/web"
 )
 
-var version = "0.1.0"
+var version = "0.2.0"
 
 func main() {
 	var (
-		cfgPath  = flag.String("config", defaultConfigPath(), "путь к файлу конфигурации")
-		addr     = flag.String("addr", "", "адрес панели управления (по умолчанию 127.0.0.1:8420)")
-		bindAll  = flag.Bool("bind-all", false, "слушать панель на всех интерфейсах (0.0.0.0)")
-		token    = flag.String("token", "", "задать токен доступа явно")
-		noAuth   = flag.Bool("no-auth", false, "отключить авторизацию (только для доверенной сети!)")
-		showVer  = flag.Bool("version", false, "показать версию и выйти")
+		cfgPath = flag.String("config", defaultConfigPath(), "путь к файлу конфигурации")
+		addr    = flag.String("addr", "", "адрес панели управления (по умолчанию 127.0.0.1:8420)")
+		bindAll = flag.Bool("bind-all", false, "слушать панель на всех интерфейсах (0.0.0.0)")
+		token   = flag.String("token", "", "задать токен доступа явно")
+		noAuth  = flag.Bool("no-auth", false, "отключить авторизацию (только для доверенной сети!)")
+		showVer = flag.Bool("version", false, "показать версию и выйти")
 	)
 	flag.Parse()
 
@@ -97,9 +97,14 @@ func main() {
 	}
 
 	srv := web.NewServer(cfg, mgr, scanner, version)
+	defer srv.Close()
 	httpSrv := &http.Server{
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 * 1024,
 	}
 
 	ln, err := net.Listen("tcp", cfg.Web.Addr)

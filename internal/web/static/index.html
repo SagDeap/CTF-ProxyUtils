@@ -11,7 +11,7 @@
 <!-- Экран входа -->
 <div id="login" class="login hidden">
   <form class="login-box" id="login-form">
-    <div class="login-logo">CTF<span>·</span>ProxyUtils</div>
+    <div class="login-logo"><span class="logo-mark" aria-hidden="true">//</span><span>CTF<b>·</b>ProxyUtils</span></div>
     <p class="login-hint">Токен показан в консоли при запуске утилиты</p>
     <input type="password" id="login-token" placeholder="токен доступа" autocomplete="current-password" autofocus>
     <button type="submit" class="btn btn-primary">Войти</button>
@@ -22,24 +22,29 @@
 <!-- Основное приложение -->
 <div id="app" class="hidden">
   <header class="topbar">
-    <div class="logo">CTF<span>·</span>ProxyUtils</div>
+    <div class="logo"><span class="logo-mark" aria-hidden="true">//</span><span>CTF<b>·</b>ProxyUtils</span></div>
     <nav class="tabs">
-      <button class="tab active" data-tab="rules">Пробросы <span class="badge" id="badge-rules">0</span></button>
-      <button class="tab" data-tab="scan">Сканер сети</button>
-      <button class="tab" data-tab="traffic">Трафик</button>
+      <button class="tab active" data-tab="rules"><span class="tab-icon" aria-hidden="true">↗</span>Пробросы <span class="badge" id="badge-rules">0</span></button>
+      <button class="tab" data-tab="scan"><span class="tab-icon" aria-hidden="true">⌁</span>Сканер сети</button>
+      <button class="tab" data-tab="traffic"><span class="tab-icon" aria-hidden="true">⇄</span>Трафик</button>
+      <button class="tab" data-tab="monitor"><span class="tab-icon" aria-hidden="true">⌁</span>Мониторинг</button>
     </nav>
     <div class="sysinfo">
       <span id="sys-host" title="имя машины"></span>
       <span class="dot" id="conn-dot" title="связь с утилитой"></span>
+      <button class="btn btn-sm btn-ghost" id="btn-logout">Выйти</button>
     </div>
   </header>
 
   <main>
     <!-- ── Пробросы ───────────────────────────────────────────── -->
     <section id="tab-rules" class="tab-panel active">
+      <div class="page-heading">
+        <div><span class="eyebrow">ROUTING DESK</span><h1>Пробросы</h1><p>Маршруты, резервирование и состояние соединений.</p></div>
+        <div class="totals" id="rules-totals"></div>
+      </div>
       <div class="toolbar">
         <button class="btn btn-primary" id="btn-new-rule">+ Новый проброс</button>
-        <div class="totals" id="rules-totals"></div>
       </div>
       <div id="rules-list" class="rules"></div>
       <div class="empty hidden" id="rules-empty">
@@ -51,6 +56,9 @@
 
     <!-- ── Сканер ─────────────────────────────────────────────── -->
     <section id="tab-scan" class="tab-panel">
+      <div class="page-heading">
+        <div><span class="eyebrow">NETWORK DISCOVERY</span><h1>Сканер сети</h1><p>Найдите сервисы и создайте правило в один клик.</p></div>
+      </div>
       <form class="scan-form" id="scan-form">
         <div class="field">
           <label>Подсеть</label>
@@ -97,18 +105,45 @@
 
     <!-- ── Трафик ─────────────────────────────────────────────── -->
     <section id="tab-traffic" class="tab-panel">
+      <div class="page-heading">
+        <div><span class="eyebrow">PACKET WORKSPACE</span><h1>Трафик</h1><p>Ищите сигнатуры, изучайте потоки и закрепляйте находки.</p></div>
+      </div>
       <div class="toolbar">
-        <select id="traffic-rule" class="select"></select>
+        <select id="traffic-rule" class="select" aria-label="Правило для просмотра трафика"></select>
         <button class="btn btn-ghost" id="btn-traffic-refresh">Обновить</button>
-        <button class="btn btn-ghost" id="btn-traffic-clear">Очистить</button>
+        <button class="btn btn-ghost" id="btn-traffic-clear">Очистить незакреплённые</button>
         <label class="check"><input type="checkbox" id="traffic-auto"> автообновление</label>
       </div>
+      <form id="traffic-search" class="traffic-search">
+        <div class="field grow"><label for="traffic-query">Поиск по потоку</label><input id="traffic-query" type="text" placeholder="флаг, запрос или сигнатура" autocomplete="off"></div>
+        <div class="field compact"><label for="traffic-mode">Формат</label><select id="traffic-mode" class="select"><option value="text">Текст</option><option value="hex">Hex</option><option value="regex">Regex</option></select></div>
+        <div class="field"><label for="traffic-dir">Направление</label><select id="traffic-dir" class="select"><option value="any">Оба</option><option value="in">От клиента →</option><option value="out">От сервиса ←</option></select></div>
+        <div class="field"><label for="traffic-remote">Адрес клиента</label><input id="traffic-remote" type="text" placeholder="IP или часть адреса"></div>
+        <details class="search-extra"><summary>Время и закрепления</summary><div class="search-extra-fields">
+          <div class="field"><label for="traffic-from">Начало соединения с</label><input id="traffic-from" type="datetime-local" step="1"></div>
+          <div class="field"><label for="traffic-to">До</label><input id="traffic-to" type="datetime-local" step="1"></div>
+          <label class="check"><input id="traffic-pinned" type="checkbox"> только закреплённые</label>
+        </div></details>
+        <div class="search-actions"><button type="submit" class="btn btn-primary">Найти</button><button type="reset" class="btn btn-ghost">Сбросить</button></div>
+      </form>
+      <p class="hint traffic-hint">Поиск чувствителен к регистру, проходит через границы чанков. Два направления проверяются отдельно. Закрепления и записи хранятся в памяти до перезапуска.</p>
+      <p id="traffic-error" class="inline-error hidden" role="alert"></p>
+      <div class="traffic-pagination"><span id="traffic-count" class="dim" aria-live="polite"></span><button id="traffic-prev" class="btn btn-sm btn-ghost" disabled>← Назад</button><button id="traffic-next" class="btn btn-sm btn-ghost" disabled>Далее →</button></div>
       <div id="traffic-list" class="traffic"></div>
       <div class="empty hidden" id="traffic-empty">
         <p>Записей нет.</p>
-        <p class="dim">Включите «запись трафика» в настройках правила — тогда всё,
-           что через него пройдёт, окажется здесь.</p>
+        <p class="dim">Включите запись в настройках правила или измените фильтры.</p>
       </div>
+    </section>
+
+    <section id="tab-monitor" class="tab-panel">
+      <div class="page-heading monitor-intro"><div><span class="eyebrow">LIVE TELEMETRY</span><h1>Мониторинг</h1><p>Нагрузка и журнал важных событий.</p></div><span class="dim" id="metrics-window">Все пробросы · последние 5 минут</span></div>
+      <div id="metric-cards" class="metric-cards"></div>
+      <div class="chart-grid"><div id="chart-traffic" class="chart-card"></div><div id="chart-connections" class="chart-card"></div><div id="chart-active" class="chart-card"></div></div>
+      <div class="journal-toolbar"><h2>Журнал событий</h2><select id="events-rule" class="select" aria-label="События правила"><option value="">Все правила</option></select><input id="events-query" type="text" placeholder="Найти в событиях" aria-label="Поиск по журналу"><span id="events-count" class="dim"></span></div>
+      <p class="hint">Журнал и графики хранятся в памяти. Новые события сверху.</p>
+      <div class="events-table"><table><thead><tr><th>Время</th><th>Правило</th><th>Событие</th></tr></thead><tbody id="events-list"></tbody></table></div>
+      <div class="empty hidden" id="events-empty">Событий пока нет.</div>
     </section>
   </main>
 </div>
@@ -202,7 +237,7 @@
             <input type="number" id="f-dump-kb" value="64" min="1" max="4096">
           </div>
         </div>
-        <p class="hint">Память под запись ограничена сверху: соединений × КБ × 2 направления.</p>
+        <p class="hint">Лимит полезной нагрузки: соединений × КБ × 2 направления, плюс служебные данные. Закреплённые записи занимают места в этом же лимите.</p>
       </details>
 
       <details class="section">
@@ -243,6 +278,7 @@
 
 <div id="toast" class="toast hidden"></div>
 
+<script src="/traffic-utils.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

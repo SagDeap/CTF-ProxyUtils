@@ -1,65 +1,50 @@
 name: Релиз
 
-# Релиз собирается по тегу вида v0.1.0:
-#   git tag v0.1.0 && git push origin v0.1.0
 on:
   push:
-    tags:
-      - 'v*'
-  # Позволяет собрать релиз вручную из вкладки Actions.
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Тег для релиза (например v0.1.0)'
+        description: 'Существующий тег, например v0.2.0'
         required: true
 
 permissions:
-  contents: write # нужно, чтобы создать релиз и приложить файлы
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
-
+          go-version: '1.27.x'
+          cache: false
       - name: Проверки
         run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           go vet ./...
           go test -race ./...
-
-      - name: Определить версию
-        id: ver
-        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
-
+          GOARCH=386 CGO_ENABLED=0 go test ./...
+          node --test internal/web/static/_traffic-utils.test.js
       - name: Собрать бинарники
-        run: make dist VERSION=${{ steps.ver.outputs.tag }}
-
-      - name: Подготовить описание
         run: |
-          cat > notes.md <<'NOTES'
-          Утилита для Attack/Defense CTF: найти машины команды в локальной сети
-          и пробросить на них порты с боевой виртуалки.
-
-          Скачайте бинарник под нужную систему — он статический, зависимостей нет.
-
-          ```sh
-          curl -LO https://github.com/${{ github.repository }}/releases/latest/download/ctf-proxyutils-linux-amd64
-          chmod +x ctf-proxyutils-linux-amd64
-          ./ctf-proxyutils-linux-amd64
-          ```
-
-          Токен доступа и ссылка на панель печатаются при запуске.
-          Контрольные суммы — в `checksums.txt`.
-          NOTES
-
-      - name: Создать релиз
+          make dist VERSION="$RELEASE_TAG"
+          test "$(dist/ctf-proxyutils-linux-amd64 -version)" = "ctf-proxyutils $RELEASE_TAG"
+          cd dist && sha256sum -c checksums.txt
+      - name: Опубликовать релиз
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.ver.outputs.tag }}" dist/* \
-            --title "CTF-ProxyUtils ${{ steps.ver.outputs.tag }}" \
-            --notes-file notes.md
+          gh release create "$RELEASE_TAG" dist/* \
+            --verify-tag --title "CTF-ProxyUtils $RELEASE_TAG" \
+            --notes-file "docs/releases/$RELEASE_TAG.md"

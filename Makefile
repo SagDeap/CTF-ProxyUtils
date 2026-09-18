@@ -31,7 +31,7 @@ clean:
 
 ## dist — статические бинарники под все платформы плюс контрольные суммы.
 ## Нужен официальный toolchain с go.dev: gccgo кросс-компиляцию не умеет.
-## Версия переопределяется извне: make dist VERSION=v0.1.0
+## Версия переопределяется извне: make dist VERSION=v0.2.0
 dist:
 	@rm -rf dist && mkdir -p dist
 	@for p in $(PLATFORMS); do \

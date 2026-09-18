@@ -1,0 +1,31 @@
+name: Проверки
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Race detector
+        if: runner.os == 'Linux'
+        run: go test -race ./...
+      - run: node --test internal/web/static/_traffic-utils.test.js
+      - name: 32-bit tests
+        if: runner.os == 'Linux'
+        run: GOARCH=386 CGO_ENABLED=0 go test ./...

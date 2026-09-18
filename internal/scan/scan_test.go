@@ -12,8 +12,8 @@ func TestParsePorts(t *testing.T) {
 		{"80", []int{80}},
 		{"80,443", []int{80, 443}},
 		{"7000-7003", []int{7000, 7001, 7002, 7003}},
-		{"443,80,443", []int{80, 443}},          // дубликаты схлопываются
-		{"22, 80 , 443", []int{22, 80, 443}},    // пробелы игнорируются
+		{"443,80,443", []int{80, 443}},               // дубликаты схлопываются
+		{"22, 80 , 443", []int{22, 80, 443}},         // пробелы игнорируются
 		{"7003-7000", []int{7000, 7001, 7002, 7003}}, // перевёрнутый диапазон
 	}
 	for _, c := range cases {
@@ -105,13 +105,13 @@ func TestIPLess(t *testing.T) {
 
 func TestMatchBanner(t *testing.T) {
 	cases := map[string]string{
-		"SSH-2.0-OpenSSH_9.2p1 Debian":  "ssh",
-		"HTTP/1.1 200 OK\r\n":           "http",
-		"RFB 003.008\n":                 "vnc",
-		"-ERR unknown command":          "redis",
-		"220 ProFTPD Server ready":      "ftp",
-		"220 mail.example.com ESMTP":    "smtp",
-		"случайный мусор":                "",
+		"SSH-2.0-OpenSSH_9.2p1 Debian": "ssh",
+		"HTTP/1.1 200 OK\r\n":          "http",
+		"RFB 003.008\n":                "vnc",
+		"-ERR unknown command":         "redis",
+		"220 ProFTPD Server ready":     "ftp",
+		"220 mail.example.com ESMTP":   "smtp",
+		"случайный мусор":              "",
 	}
 	for banner, want := range cases {
 		if got := matchBanner(banner); got != want {

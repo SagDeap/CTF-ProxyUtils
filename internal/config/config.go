@@ -92,9 +92,30 @@ func (c *Config) Path() string { return c.path }
 // SetRules подменяет набор правил и сохраняет конфиг.
 func (c *Config) SetRules(rules []proxy.RuleSpec) error {
 	c.mu.Lock()
-	c.Rules = rules
-	c.mu.Unlock()
-	return c.Save()
+	defer c.mu.Unlock()
+	c.Rules = make([]proxy.RuleSpec, len(rules))
+	for i, rule := range rules {
+		c.Rules[i] = rule
+		c.Rules[i].AllowCIDR = append([]string(nil), rule.AllowCIDR...)
+		if rule.Backup != nil {
+			backup := *rule.Backup
+			c.Rules[i].Backup = &backup
+		}
+	}
+	return c.saveLocked()
+}
+
+func (c *Config) ScanSnapshot() ScanDefaults {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Scan
+}
+
+func (c *Config) SetScan(scan ScanDefaults) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Scan = scan
+	return c.saveLocked()
 }
 
 // Save пишет конфиг атомарно: сначала во временный файл рядом, потом rename.
@@ -102,7 +123,10 @@ func (c *Config) SetRules(rules []proxy.RuleSpec) error {
 func (c *Config) Save() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.saveLocked()
+}
 
+func (c *Config) saveLocked() error {
 	if c.path == "" {
 		return nil // конфиг не привязан к файлу — работаем только в памяти
 	}

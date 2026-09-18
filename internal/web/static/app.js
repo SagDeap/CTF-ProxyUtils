@@ -13,16 +13,24 @@ let expandedConns = new Set();
 let openTab = 'rules';
 let editingId = null;
 let trafficView = 'hex';
+let trafficLayout = 'stream';
+let polling = false;
+let authGeneration = 0;
+let trafficController = null;
+let trafficGeneration = 0;
+let trafficOffset = 0;
+let trafficTotal = 0;
+let trafficItems = [];
+const trafficDetails = new Map();
+const routingPending = new Set();
+const { joinStream, buildSearch, chartSeries } = TrafficUtils;
 
 /* ── Экранирование ────────────────────────────────────────────
    Баннеры сервисов, имена хостов и дампы трафика приходят с чужих
    машин. Всё, что попадает в разметку, обязано быть экранировано —
    иначе чужой баннер выполнит скрипт в нашей же панели. */
 function esc(s) {
-  if (s === null || s === undefined) return '';
-  return String(s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  return TrafficUtils.escapeHTML(s);
 }
 
 /* ── Обращения к API ─────────────────────────────────────────── */
@@ -81,6 +89,8 @@ function toast(msg, kind) {
 /* ── Вход ────────────────────────────────────────────────────── */
 function showLogin() {
   stopPolling();
+  authGeneration++;
+  invalidateTraffic();
   $('login').classList.remove('hidden');
   $('app').classList.add('hidden');
 }
@@ -110,6 +120,13 @@ $('login-form').addEventListener('submit', async (e) => {
   }
 });
 
+$('btn-logout').addEventListener('click', () => {
+  token = '';
+  localStorage.removeItem('cpu_token');
+  $('login-token').value = '';
+  showLogin();
+});
+
 /* ── Опрос состояния ─────────────────────────────────────────── */
 function startPolling() {
   if (pollTimer) return;
@@ -122,13 +139,19 @@ function stopPolling() {
 }
 
 async function poll() {
-  if (document.hidden) return; // фоновая вкладка не нагружает виртуалку
+  if (document.hidden || polling) return;
+  polling = true;
+  const generation = authGeneration;
   try {
-    state = await api('/api/state');
+    const next = await api('/api/state');
+    if (generation !== authGeneration) return;
+    state = next;
     $('conn-dot').classList.remove('stale');
     render();
   } catch (err) {
     $('conn-dot').classList.add('stale');
+  } finally {
+    polling = false;
   }
 }
 
@@ -139,6 +162,7 @@ function render() {
   renderRules();
   renderScan();
   renderTrafficSelect();
+  if (openTab === 'monitor') renderMonitor();
 }
 
 /* ── Пробросы ────────────────────────────────────────────────── */
@@ -154,12 +178,53 @@ function renderRules() {
     ? `${conns} активных · ↓${fmtBytes(bin)} ↑${fmtBytes(bout)}`
     : '';
 
-  list.innerHTML = rules.map(ruleCard).join('');
-
-  list.querySelectorAll('[data-act]').forEach((btn) => {
-    btn.addEventListener('click', () => ruleAction(btn.dataset.id, btn.dataset.act));
+  const ids = new Set(rules.map((r) => r.spec.id));
+  for (const child of [...list.children]) if (!ids.has(child.dataset.rule)) child.remove();
+  rules.forEach((rule) => {
+    const template = document.createElement('template');
+    template.innerHTML = ruleCard(rule).trim();
+    const next = template.content.firstElementChild;
+    const current = [...list.children].find((el) => el.dataset.rule === rule.spec.id);
+    if (!current) { list.appendChild(next); return; }
+    current.className = next.className;
+    for (const selector of ['.rule-identity', '.rule-stats', '.rule-error']) {
+      const target = current.querySelector(selector);
+      const fresh = next.querySelector(selector);
+      if (target.innerHTML !== fresh.innerHTML) target.innerHTML = fresh.innerHTML;
+      target.className = fresh.className;
+    }
+    const actions = current.querySelector('.rule-actions');
+    const freshActions = next.querySelector('.rule-actions');
+    // Keep controls mounted while their labels and live counters change.
+    const select = actions.querySelector('[data-routing]');
+    const freshSelect = freshActions.querySelector('[data-routing]');
+    if (!!select !== !!freshSelect) {
+      if (!actions.contains(document.activeElement)) actions.innerHTML = freshActions.innerHTML;
+    } else {
+      actions.querySelector('[data-act="toggle"]').textContent = rule.running ? 'Стоп' : 'Пуск';
+      if (select && document.activeElement !== select && !routingPending.has(rule.spec.id)) {
+        select.value = rule.spec.routing_mode || 'auto';
+      }
+    }
   });
 }
+
+$('rules-list').addEventListener('click', (e) => {
+  const button = e.target.closest('[data-act]');
+  if (button) ruleAction(button.dataset.id, button.dataset.act);
+});
+
+$('rules-list').addEventListener('change', async (e) => {
+  const select = e.target.closest('[data-routing]');
+  if (!select) return;
+  const id = select.dataset.routing;
+  routingPending.add(id);
+  select.disabled = true;
+  try {
+    await api(`/api/rules/${encodeURIComponent(id)}/switch`, { method: 'POST', body: JSON.stringify({ mode: select.value }) });
+  } catch (err) { toast(err.message, 'err'); }
+  finally { routingPending.delete(id); select.disabled = false; poll(); }
+});
 
 function ruleCard(r) {
   const s = r.spec;
@@ -186,16 +251,20 @@ function ruleCard(r) {
   const hasBackup = s.backup && s.backup.host;
 
   return `
-  <div class="${cls}">
+  <div class="${cls}" data-rule="${esc(s.id)}">
     <div class="rule-head">
+      <div class="rule-identity">
       <span class="rule-name">${esc(s.name || 'без названия')}</span>
       <span class="rule-path">
         ${esc(s.listen_host)}:${s.listen_port}<span class="to">→</span>${esc(target.host)}:${target.port}
       </span>
       ${tags.join('')}
+      </div>
       <div class="rule-actions">
-        ${hasBackup ? `<button class="btn btn-sm btn-ghost" data-act="switch" data-id="${esc(s.id)}">
-            ${r.using_backup ? 'на основной' : 'на резерв'}</button>` : ''}
+        ${hasBackup ? `<select class="select routing-select" data-routing="${esc(s.id)}" aria-label="Режим маршрутизации ${esc(s.name || s.listen_port)}">
+          <option value="auto" ${!s.routing_mode || s.routing_mode === 'auto' ? 'selected' : ''}>Авто</option>
+          <option value="primary" ${s.routing_mode === 'primary' ? 'selected' : ''}>Основной</option>
+          <option value="backup" ${s.routing_mode === 'backup' ? 'selected' : ''}>Резерв</option></select>` : ''}
         <button class="btn btn-sm" data-act="toggle" data-id="${esc(s.id)}">
           ${r.running ? 'Стоп' : 'Пуск'}</button>
         <button class="btn btn-sm btn-ghost" data-act="edit" data-id="${esc(s.id)}">Изменить</button>
@@ -211,7 +280,7 @@ function ruleCard(r) {
       ${r.denied_conns ? `<span>отклонено <b>${r.denied_conns}</b></span>` : ''}
       <span>${fmtAgo(r.last_active_unix_ms)}</span>
     </div>
-    ${r.last_error ? `<div class="rule-error">${esc(r.last_error)}</div>` : ''}
+    <div class="rule-error${r.last_error ? '' : ' hidden'}">${esc(r.last_error)}</div>
   </div>`;
 }
 
@@ -223,11 +292,6 @@ async function ruleAction(id, act) {
       await api(`/api/rules/${id}/toggle`, {
         method: 'POST',
         body: JSON.stringify({ enabled: !rule.running }),
-      });
-    } else if (act === 'switch') {
-      await api(`/api/rules/${id}/switch`, {
-        method: 'POST',
-        body: JSON.stringify({ backup: !rule.using_backup }),
       });
     } else if (act === 'delete') {
       const name = rule.spec.name || `${rule.spec.listen_port}`;
@@ -320,6 +384,7 @@ $('rule-form').addEventListener('submit', async (e) => {
 
   const spec = {
     name: $('f-name').value.trim(),
+    routing_mode: editingId ? ((state.rules || []).find((r) => r.spec.id === editingId)?.spec.routing_mode || 'auto') : 'auto',
     enabled: $('f-enabled').checked,
     listen_host: $('f-listen-host').value.trim() || '0.0.0.0',
     listen_port: parseInt($('f-listen-port').value, 10),
@@ -434,7 +499,9 @@ function renderScan() {
 
   const hosts = sc.hosts || [];
   $('scan-empty').classList.toggle('hidden', running || hosts.length > 0 || !sc.total);
-  $('scan-results').innerHTML = hosts.map(hostCard).join('');
+  const markup = hosts.map(hostCard).join('');
+  if ($('scan-results').innerHTML === markup || $('scan-results').contains(document.activeElement)) return;
+  $('scan-results').innerHTML = markup;
 
   $('scan-results').querySelectorAll('[data-fwd]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -480,38 +547,139 @@ function hostCard(h) {
 /* ── Трафик ──────────────────────────────────────────────────── */
 function renderTrafficSelect() {
   const sel = $('traffic-rule');
-  const rules = (state.rules || []).filter((r) => r.spec.dump.enabled);
+  const rules = (state.rules || []).filter((r) => r.spec.dump.enabled || r.dump_count > 0);
   const cur = sel.value;
   const opts = rules.map((r) =>
-    `<option value="${esc(r.spec.id)}">${esc(r.spec.name || r.spec.listen_port)} — ${r.dump_count} записей</option>`
+    `<option value="${esc(r.spec.id)}">${esc(r.spec.name || r.spec.listen_port)}</option>`
   ).join('');
-  if (sel.innerHTML !== opts) {
-    sel.innerHTML = opts || '<option value="">нет правил с записью трафика</option>';
+  const markup = opts || '<option value="">нет правил с записью трафика</option>';
+  if (sel.innerHTML !== markup && document.activeElement !== sel) {
+    sel.innerHTML = markup;
     if (cur && rules.some((r) => r.spec.id === cur)) sel.value = cur;
+    if (cur !== sel.value) resetTraffic();
   }
 }
 
-async function loadTraffic() {
+function invalidateTraffic() {
+  trafficGeneration++;
+  if (trafficController) trafficController.abort();
+  trafficController = null;
+}
+
+function resetTraffic() {
+  invalidateTraffic();
+  trafficOffset = 0;
+  expandedConns.clear();
+  trafficDetails.clear();
+  trafficItems = [];
+  $('traffic-list').replaceChildren();
+  if (openTab === 'traffic') loadTraffic();
+}
+
+function trafficFilters() {
+  return { q: $('traffic-query').value, mode: $('traffic-mode').value, dir: $('traffic-dir').value,
+    remote: $('traffic-remote').value, from: $('traffic-from').value, to: $('traffic-to').value,
+    pinned: $('traffic-pinned').checked };
+}
+
+async function loadTraffic(background = false) {
+  if (document.hidden || $('app').classList.contains('hidden') || (background && trafficController)) return;
+  invalidateTraffic();
   const id = $('traffic-rule').value;
   if (!id) {
-    $('traffic-list').innerHTML = '';
+    trafficItems = [];
+    $('traffic-list').replaceChildren();
+    $('traffic-count').textContent = '';
+    $('traffic-prev').disabled = $('traffic-next').disabled = true;
     $('traffic-empty').classList.remove('hidden');
     return;
   }
+  const generation = trafficGeneration;
+  const controller = new AbortController();
+  trafficController = controller;
+  $('traffic-list').setAttribute('aria-busy', 'true');
   try {
-    const dumps = await api(`/api/rules/${id}/dumps`);
-    $('traffic-empty').classList.toggle('hidden', dumps.length > 0);
-    $('traffic-list').innerHTML = dumps.map(connCard).join('');
-    $('traffic-list').querySelectorAll('.conn-head').forEach((el) => {
-      el.addEventListener('click', () => {
-        const cid = el.dataset.cid;
-        if (expandedConns.has(cid)) expandedConns.delete(cid); else expandedConns.add(cid);
-        loadTraffic();
-      });
-    });
+    const query = buildSearch(trafficFilters(), trafficOffset);
+    const result = await api(`/api/rules/${encodeURIComponent(id)}/dumps?${query}`, { signal: controller.signal });
+    if (generation !== trafficGeneration) return;
+    trafficItems = result.items || [];
+    trafficTotal = result.total || 0;
+    if (!trafficItems.length && trafficOffset > 0 && trafficTotal <= trafficOffset) {
+      trafficOffset = Math.max(0, Math.floor(Math.max(0, trafficTotal - 1) / 50) * 50);
+      loadTraffic();
+      return;
+    }
+    const liveIDs = new Set(trafficItems.map((c) => String(c.id)));
+    for (const cid of expandedConns) if (!liveIDs.has(cid)) expandedConns.delete(cid);
+    for (const cid of trafficDetails.keys()) if (!liveIDs.has(cid)) trafficDetails.delete(cid);
+    $('traffic-error').classList.add('hidden');
+    renderTraffic();
+    for (const cid of expandedConns) {
+      const summary = trafficItems.find((c) => String(c.id) === cid);
+      const cached = trafficDetails.get(cid);
+      if (cached && cached.ended_at && cached.bytes_in === summary.bytes_in && cached.bytes_out === summary.bytes_out) continue;
+      const detail = await api(`/api/rules/${encodeURIComponent(id)}/dumps/${encodeURIComponent(cid)}`, { signal: controller.signal });
+      if (generation !== trafficGeneration) return;
+      trafficDetails.set(cid, detail);
+      renderTraffic();
+    }
   } catch (err) {
-    toast(err.message, 'err');
+    if (err.name !== 'AbortError' && generation === trafficGeneration) {
+      $('traffic-error').textContent = err.message;
+      $('traffic-error').classList.remove('hidden');
+    }
+  } finally {
+    if (generation === trafficGeneration) {
+      trafficController = null;
+      $('traffic-list').setAttribute('aria-busy', 'false');
+    }
   }
+}
+
+function renderTraffic() {
+  $('traffic-empty').classList.toggle('hidden', trafficItems.length > 0);
+  $('traffic-count').textContent = trafficTotal ? `${trafficOffset + 1}–${trafficOffset + trafficItems.length} из ${trafficTotal}` : 'Найдено: 0';
+  $('traffic-prev').disabled = trafficOffset === 0;
+  $('traffic-next').disabled = trafficOffset + trafficItems.length >= trafficTotal;
+  const list = $('traffic-list');
+  const liveIDs = new Set(trafficItems.map((c) => String(c.id)));
+  for (const child of [...list.children]) if (!liveIDs.has(child.dataset.cid)) child.remove();
+  trafficItems.forEach((connection, index) => {
+    let card = [...list.children].find((el) => el.dataset.cid === String(connection.id));
+    const template = document.createElement('template');
+    template.innerHTML = connCard(connection).trim();
+    const next = template.content.firstElementChild;
+    if (!card) { card = next; }
+    else {
+      card.className = next.className;
+      // Headers and pin buttons retain focus during background refreshes.
+      const toggle = card.querySelector('[data-expand]');
+      const freshToggle = next.querySelector('[data-expand]');
+      if (toggle.innerHTML !== freshToggle.innerHTML) toggle.innerHTML = freshToggle.innerHTML;
+      toggle.setAttribute('aria-expanded', freshToggle.getAttribute('aria-expanded'));
+      const pin = card.querySelector('[data-pin]');
+      const freshPin = next.querySelector('[data-pin]');
+      pin.textContent = freshPin.textContent;
+      pin.setAttribute('aria-pressed', freshPin.getAttribute('aria-pressed'));
+      const body = card.querySelector('.conn-body');
+      const freshBody = next.querySelector('.conn-body');
+      if (!freshBody) { if (body) body.remove(); }
+      else if (!body) card.appendChild(freshBody);
+      else if (body.innerHTML !== freshBody.innerHTML) {
+        for (const selector of ['.traffic-content', '.capture-note']) {
+          const target = body.querySelector(selector);
+          const replacement = freshBody.querySelector(selector);
+          if (target.innerHTML !== replacement.innerHTML) target.innerHTML = replacement.innerHTML;
+        }
+        for (const btn of body.querySelectorAll('[data-view], [data-layout]')) {
+          const selected = btn.dataset.view ? btn.dataset.view === trafficView : btn.dataset.layout === trafficLayout;
+          btn.className = `btn btn-sm ${selected ? 'btn-primary' : 'btn-ghost'}`;
+          btn.setAttribute('aria-pressed', String(selected));
+        }
+      }
+    }
+    if (list.children[index] !== card) list.insertBefore(card, list.children[index] || null);
+  });
 }
 
 function connCard(c) {
@@ -522,28 +690,41 @@ function connCard(c) {
 
   let body = '';
   if (open) {
+    const detail = trafficDetails.get(String(c.id));
     body = `<div class="conn-body">
       <div class="view-toggle">
-        <button class="btn btn-sm ${trafficView === 'hex' ? 'btn-primary' : 'btn-ghost'}" data-view="hex">hex</button>
-        <button class="btn btn-sm ${trafficView === 'text' ? 'btn-primary' : 'btn-ghost'}" data-view="text">текст</button>
+        ${['hex', 'text'].map((view) => `<button class="btn btn-sm ${trafficView === view ? 'btn-primary' : 'btn-ghost'}" data-view="${view}" aria-pressed="${trafficView === view}">${view === 'hex' ? 'Hex' : 'Текст'}</button>`).join('')}
+        ${['stream', 'chunks'].map((layout) => `<button class="btn btn-sm ${trafficLayout === layout ? 'btn-primary' : 'btn-ghost'}" data-layout="${layout}" aria-pressed="${trafficLayout === layout}">${layout === 'stream' ? 'Целый поток' : 'Чанки'}</button>`).join('')}
+        <button class="btn btn-sm btn-ghost export-button" data-export="${esc(c.id)}">Скачать JSON</button>
       </div>
-      ${(c.chunks || []).map(chunkBlock).join('') || '<p class="dim">пусто</p>'}
-      ${c.truncated ? '<p class="hint">запись обрезана по лимиту</p>' : ''}
+      <div class="traffic-content">${detail ? trafficContent(detail) : '<p class="dim">Загрузка потока…</p>'}</div>
+      <p class="hint capture-note">${c.truncated ? 'Запись обрезана по лимиту.' : ''}</p>
     </div>`;
   }
 
   return `
-  <div class="conn">
-    <div class="conn-head" data-cid="${c.id}">
+  <div class="conn${c.pinned ? ' pinned' : ''}" data-cid="${esc(c.id)}">
+    <div class="conn-head"><button class="conn-expand" data-expand="${esc(c.id)}" aria-expanded="${open}">
       <span>${open ? '▾' : '▸'}</span>
       <span class="conn-remote">${esc(c.remote_addr)}</span>
       <span class="dim">→ ${esc(c.target)}</span>
-      <span class="dim">${fmtTime(c.started_at)}</span>
+      <span class="dim" title="${esc(new Date(c.started_at).toLocaleString('ru-RU'))}">${fmtTime(c.started_at)}</span>
       <span class="dim">↓${fmtBytes(c.bytes_in)} ↑${fmtBytes(c.bytes_out)}</span>
       <span class="dim">${dur}</span>
+      ${c.truncated ? '<span class="tag warn">обрезано</span>' : ''}
+      </button><button class="btn btn-sm btn-ghost pin-button" data-pin="${esc(c.id)}" aria-pressed="${!!c.pinned}">${c.pinned ? '★ Закреплено' : '☆ Закрепить'}</button>
     </div>
     ${body}
   </div>`;
+}
+
+function trafficContent(detail) {
+  if (trafficLayout === 'chunks') return (detail.chunks || []).map(chunkBlock).join('') || '<p class="dim">Пусто</p>';
+  return ['in', 'out'].map((dir) => {
+    const bytes = joinStream(detail.chunks, dir);
+    const content = trafficView === 'hex' ? hexdump(bytes) : esc(bytesToText(bytes));
+    return `<div class="chunk"><div class="chunk-head ${dir}">${dir === 'in' ? '→ От клиента' : '← От сервиса'} · ${fmtBytes(bytes.length)}</div><pre class="hexdump">${content || 'пусто'}</pre></div>`;
+  }).join('');
 }
 
 function chunkBlock(ch) {
@@ -558,26 +739,12 @@ function chunkBlock(ch) {
 }
 
 function b64ToBytes(b64) {
-  if (!b64) return new Uint8Array(0);
-  try {
-    const bin = atob(b64);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  } catch (e) {
-    return new Uint8Array(0);
-  }
+  return TrafficUtils.decodeBytes(b64);
 }
 
 // bytesToText показывает полезную нагрузку как текст, заменяя непечатаемое.
 function bytesToText(bytes) {
-  let s = '';
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i];
-    s += (b === 10 || b === 13 || b === 9 || (b >= 32 && b < 127))
-      ? String.fromCharCode(b) : '.';
-  }
-  return s;
+  return new TextDecoder('utf-8').decode(bytes).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '.');
 }
 
 // hexdump рисует классические 16 байт в строке: смещение, hex, ASCII.
@@ -602,35 +769,143 @@ function hexdump(bytes) {
   return lines.join('\n');
 }
 
-$('traffic-rule').addEventListener('change', loadTraffic);
-$('btn-traffic-refresh').addEventListener('click', loadTraffic);
+$('traffic-rule').addEventListener('change', resetTraffic);
+$('btn-traffic-refresh').addEventListener('click', () => loadTraffic());
+$('traffic-search').addEventListener('submit', (e) => { e.preventDefault(); trafficOffset = 0; loadTraffic(); });
+$('traffic-search').addEventListener('reset', () => { setTimeout(() => { trafficOffset = 0; loadTraffic(); }, 0); });
+$('traffic-prev').addEventListener('click', () => { trafficOffset = Math.max(0, trafficOffset - 50); loadTraffic(); });
+$('traffic-next').addEventListener('click', () => { if (trafficOffset + 50 < trafficTotal) { trafficOffset += 50; loadTraffic(); } });
 $('btn-traffic-clear').addEventListener('click', async () => {
   const id = $('traffic-rule').value;
-  if (!id || !confirm('Стереть записанный трафик этого правила?')) return;
+  if (!id || !confirm('Стереть незакреплённые записи этого правила? Закреплённые останутся.')) return;
   try {
-    await api(`/api/rules/${id}/dumps`, { method: 'DELETE' });
-    expandedConns.clear();
+    await api(`/api/rules/${encodeURIComponent(id)}/dumps`, { method: 'DELETE' });
+    trafficOffset = 0;
     loadTraffic();
-    toast('Записи стёрты', 'ok');
+    toast('Незакреплённые записи стёрты', 'ok');
   } catch (err) { toast(err.message, 'err'); }
 });
 
-$('traffic-list').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-view]');
+$('traffic-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
   if (!btn) return;
-  trafficView = btn.dataset.view;
-  loadTraffic();
+  if (btn.dataset.view || btn.dataset.layout) {
+    if (btn.dataset.view) trafficView = btn.dataset.view;
+    if (btn.dataset.layout) trafficLayout = btn.dataset.layout;
+    renderTraffic();
+    return;
+  }
+  if (btn.dataset.expand) {
+    const cid = btn.dataset.expand;
+    const wasOpen = expandedConns.has(cid);
+    expandedConns.clear();
+    if (!wasOpen) expandedConns.add(cid);
+    renderTraffic();
+    if (!wasOpen) loadTraffic();
+    return;
+  }
+  const ruleID = $('traffic-rule').value;
+  try {
+    if (btn.dataset.pin) {
+      const cid = btn.dataset.pin;
+      const item = trafficItems.find((c) => String(c.id) === cid);
+      if (!item) return;
+      const pinned = !item.pinned;
+      btn.disabled = true;
+      await api(`/api/rules/${encodeURIComponent(ruleID)}/dumps/${encodeURIComponent(cid)}/pin`, { method: 'POST', body: JSON.stringify({ pinned }) });
+      if ($('traffic-rule').value !== ruleID) return;
+      item.pinned = pinned;
+      if (trafficDetails.has(cid)) trafficDetails.get(cid).pinned = pinned;
+      loadTraffic();
+    } else if (btn.dataset.export) {
+      const cid = btn.dataset.export;
+      const detail = trafficDetails.get(cid);
+      if (!detail) { toast('Дождитесь загрузки потока', 'err'); return; }
+      const url = URL.createObjectURL(new Blob([JSON.stringify(detail, null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `traffic-${ruleID.replace(/[^a-zA-Z0-9_-]/g, '_')}-${cid}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  } catch (err) { toast(err.message, 'err'); }
+  finally { btn.disabled = false; }
 });
 
 let trafficTimer = null;
 $('traffic-auto').addEventListener('change', (e) => {
   if (e.target.checked) {
-    trafficTimer = setInterval(() => { if (openTab === 'traffic') loadTraffic(); }, 2000);
+    trafficTimer = setInterval(() => { if (openTab === 'traffic') loadTraffic(true); }, 2000);
   } else if (trafficTimer) {
     clearInterval(trafficTimer);
     trafficTimer = null;
   }
 });
+
+/* ── Нагрузка и события ──────────────────────────────────────── */
+function renderMonitor() {
+  const samples = state.metrics || [];
+  const latest = samples[samples.length - 1] || {};
+  const cards = [
+    ['От клиента', fmtBytes(latest.bytes_in_per_sec || 0) + '/с'],
+    ['От сервиса', fmtBytes(latest.bytes_out_per_sec || 0) + '/с'],
+    ['Соединений', Number(latest.connections_per_sec || 0).toFixed(1) + '/с'],
+    ['Активных', latest.active_conns || 0],
+  ];
+  $('metric-cards').innerHTML = cards.map(([label, value]) => `<div class="metric-card"><span>${label}</span><strong>${esc(value)}</strong></div>`).join('');
+  renderChart('chart-traffic', 'Передача данных', samples, [
+    { key: 'bytes_in_per_sec', label: 'От клиента', color: '#e3b341' },
+    { key: 'bytes_out_per_sec', label: 'От сервиса', color: '#58a6ff' },
+  ], (n) => fmtBytes(n) + '/с');
+  renderChart('chart-connections', 'Новые соединения и ошибки', samples, [
+    { key: 'connections_per_sec', label: 'Соединения', color: '#35d07f' },
+    { key: 'failed_per_sec', label: 'Ошибки', color: '#f04f4f' },
+  ], (n) => n.toFixed(1) + '/с');
+  renderChart('chart-active', 'Активные соединения', samples, [
+    { key: 'active_conns', label: 'Активные', color: '#a78bfa' },
+  ], (n) => String(Math.round(n)));
+  if (samples.length) {
+    const first = samples[0].at;
+    $('metrics-window').textContent = `Все пробросы · ${fmtTime(first)}–${fmtTime(latest.at)}`;
+  }
+  renderEvents();
+}
+
+function renderChart(id, title, samples, series, format) {
+  const chart = chartSeries(samples, series.map((s) => s.key));
+  const latest = samples[samples.length - 1] || {};
+  const accessible = title + '. ' + series.map((s) => `${s.label}: ${format(Number(latest[s.key]) || 0)}`).join(', ');
+  $(id).innerHTML = `<div class="chart-heading"><h3>${title}</h3><span class="dim">${esc(format(chart.max))}</span></div>
+    <svg viewBox="0 0 560 146" role="img" aria-label="${esc(accessible)}" preserveAspectRatio="none">
+      <path d="M0 4H560 M0 70H560 M0 136H560" class="chart-gridlines"/>
+      ${chart.paths.map((points, i) => points ? `<polyline points="${points}" transform="translate(0 4)" fill="none" stroke="${series[i].color}" stroke-width="2" vector-effect="non-scaling-stroke"/>` : '').join('')}
+      ${samples.length < 2 ? '<text x="280" y="76" text-anchor="middle" class="chart-placeholder">Собираем данные…</text>' : ''}
+    </svg><div class="chart-times"><span>${chart.start ? fmtTime(chart.start) : '—'}</span><span>${chart.end ? fmtTime(chart.end) : '—'}</span></div>
+    <div class="chart-legend">${series.map((s) => `<span><i style="background:${s.color}"></i>${s.label} <b>${esc(format(Number(latest[s.key]) || 0))}</b></span>`).join('')}</div>`;
+}
+
+function renderEvents() {
+  const select = $('events-rule');
+  const oldValue = select.value;
+  const names = new Map();
+  for (const rule of state.rules || []) names.set(rule.spec.id, rule.spec.name || rule.spec.listen_port);
+  for (const event of state.events || []) if (event.rule_id && !names.has(event.rule_id)) names.set(event.rule_id, event.rule_name || event.rule_id);
+  const options = '<option value="">Все правила</option>' + [...names].map(([id, name]) => `<option value="${esc(id)}">${esc(name)}</option>`).join('');
+  if (select.innerHTML !== options && document.activeElement !== select) {
+    select.innerHTML = options;
+    if (names.has(oldValue)) select.value = oldValue;
+  }
+  const query = $('events-query').value.trim().toLocaleLowerCase('ru-RU');
+  const events = (state.events || []).filter((event) => (!select.value || event.rule_id === select.value) &&
+    (!query || `${event.rule_name || ''} ${event.kind || ''} ${event.message || ''}`.toLocaleLowerCase('ru-RU').includes(query)));
+  const markup = events.map((event) => `<tr><td><time datetime="${esc(event.at)}" title="${esc(new Date(event.at).toLocaleString('ru-RU'))}">${fmtTime(event.at)}</time></td><td>${esc(event.rule_name || event.rule_id || 'Система')}</td><td><span class="event-kind">${esc(event.kind)}</span>${esc(event.message)}</td></tr>`).join('');
+  if ($('events-list').innerHTML !== markup) $('events-list').innerHTML = markup;
+  $('events-empty').classList.toggle('hidden', events.length > 0);
+  $('events-count').textContent = `${events.length} событий`;
+}
+
+$('events-rule').addEventListener('change', renderEvents);
+$('events-query').addEventListener('input', renderEvents);
 
 /* ── Вкладки ─────────────────────────────────────────────────── */
 document.querySelectorAll('.tab').forEach((tab) => {
@@ -641,7 +916,17 @@ document.querySelectorAll('.tab').forEach((tab) => {
       p.classList.toggle('active', p.id === 'tab-' + openTab);
     });
     if (openTab === 'traffic') loadTraffic();
+    else invalidateTraffic();
+    if (openTab === 'monitor') renderMonitor();
   });
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) invalidateTraffic();
+  else if (!$('app').classList.contains('hidden')) {
+    poll();
+    if (openTab === 'traffic') loadTraffic();
+  }
 });
 
 /* ── Старт ───────────────────────────────────────────────────── */

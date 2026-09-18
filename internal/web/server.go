@@ -3,7 +3,6 @@ package web
 import (
 	"crypto/subtle"
 	"embed"
-	"encoding/json"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -14,7 +13,7 @@ import (
 	"github.com/SagDeap/CTF-ProxyUtils/internal/scan"
 )
 
-//go:embed static
+//go:embed static/index.html static/style.css static/app.js static/traffic-utils.js
 var staticFS embed.FS
 
 const cookieName = "cpu_token"
@@ -27,6 +26,7 @@ type Server struct {
 	version string
 	started time.Time
 	mux     *http.ServeMux
+	metrics *metricsHistory
 }
 
 func NewServer(cfg *config.Config, mgr *proxy.Manager, sc *scan.Scanner, version string) *Server {
@@ -39,12 +39,20 @@ func NewServer(cfg *config.Config, mgr *proxy.Manager, sc *scan.Scanner, version
 		mux:     http.NewServeMux(),
 	}
 	s.routes()
+	s.metrics = newMetricsHistory(mgr)
 	return s
 }
+
+// Close stops background metric sampling; it is safe to call repeatedly.
+func (s *Server) Close() { s.metrics.close() }
 
 func (s *Server) routes() {
 	// Проверка живости — единственное, что доступно без токена.
 	s.mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "только GET")
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"ok":       true,
 			"version":  s.version,
@@ -75,6 +83,12 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Cache-Control", "no-store")
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		// Remove the legacy token cookie: cookies are shared across ports.
+		if _, err := r.Cookie(cookieName); err == nil {
+			http.SetCookie(w, &http.Cookie{Name: cookieName, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -88,16 +102,13 @@ func (s *Server) tokenOK(given string) bool {
 	return subtle.ConstantTimeCompare([]byte(given), []byte(want)) == 1
 }
 
-// presentedToken достаёт токен из заголовка или куки.
+// presentedToken only accepts explicit headers, never cross-port cookies.
 func presentedToken(r *http.Request) string {
 	if t := r.Header.Get("X-Auth-Token"); t != "" {
 		return t
 	}
 	if a := r.Header.Get("Authorization"); strings.HasPrefix(a, "Bearer ") {
 		return strings.TrimPrefix(a, "Bearer ")
-	}
-	if c, err := r.Cookie(cookieName); err == nil {
-		return c.Value
 	}
 	return ""
 }
@@ -121,8 +132,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Token string `json:"token"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
-		writeErr(w, http.StatusBadRequest, "некорректный запрос")
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	if !decode(w, r, &body) {
 		return
 	}
 	if !s.tokenOK(body.Token) {
@@ -131,19 +142,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "неверный токен")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     cookieName,
-		Value:    body.Token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   7 * 24 * 3600,
-	})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // handleStatic отдаёт вшитый фронтенд.
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeErr(w, http.StatusMethodNotAllowed, "только GET или HEAD")
+		return
+	}
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "статика недоступна")
