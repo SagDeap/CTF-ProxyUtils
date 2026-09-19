@@ -27,11 +27,24 @@ type ScanDefaults struct {
 	Fingerprint bool   `json:"fingerprint"`
 }
 
+// Profile is safe to share: it deliberately excludes the panel token and bind
+// address. Rules, detectors and scan defaults remain portable between hosts.
+type Profile struct {
+	SchemaVersion int                   `json:"schema_version"`
+	Name          string                `json:"name"`
+	ExportedAt    string                `json:"exported_at,omitempty"`
+	Scan          ScanDefaults          `json:"scan"`
+	Detection     proxy.DetectionConfig `json:"detection"`
+	Rules         []proxy.RuleSpec      `json:"rules"`
+}
+
 // Config — всё, что переживает перезапуск.
 type Config struct {
-	Web   WebConfig        `json:"web"`
-	Scan  ScanDefaults     `json:"scan"`
-	Rules []proxy.RuleSpec `json:"rules"`
+	SchemaVersion int                   `json:"schema_version"`
+	Web           WebConfig             `json:"web"`
+	Scan          ScanDefaults          `json:"scan"`
+	Detection     proxy.DetectionConfig `json:"detection"`
+	Rules         []proxy.RuleSpec      `json:"rules"`
 
 	path string
 	mu   sync.Mutex
@@ -42,7 +55,9 @@ type Config struct {
 // пробросами — это подарок соперникам.
 func Default() *Config {
 	return &Config{
-		Web: WebConfig{Addr: "127.0.0.1:8420"},
+		SchemaVersion: 1,
+		Web:           WebConfig{Addr: "127.0.0.1:8420"},
+		Detection:     proxy.DefaultDetectionConfig(),
 		Scan: ScanDefaults{
 			Ports:       "",
 			TimeoutMS:   500,
@@ -83,6 +98,12 @@ func Load(path string) (*Config, error) {
 	if cfg.Web.Addr == "" {
 		cfg.Web.Addr = Default().Web.Addr
 	}
+	if cfg.SchemaVersion <= 0 {
+		cfg.SchemaVersion = 1
+	}
+	if err := cfg.Detection.Validate(); err != nil {
+		return nil, fmt.Errorf("настройки детекторов: %w", err)
+	}
 	cfg.path = path
 	return cfg, nil
 }
@@ -95,12 +116,7 @@ func (c *Config) SetRules(rules []proxy.RuleSpec) error {
 	defer c.mu.Unlock()
 	c.Rules = make([]proxy.RuleSpec, len(rules))
 	for i, rule := range rules {
-		c.Rules[i] = rule
-		c.Rules[i].AllowCIDR = append([]string(nil), rule.AllowCIDR...)
-		if rule.Backup != nil {
-			backup := *rule.Backup
-			c.Rules[i].Backup = &backup
-		}
+		c.Rules[i] = rule.Clone()
 	}
 	return c.saveLocked()
 }
@@ -116,6 +132,34 @@ func (c *Config) SetScan(scan ScanDefaults) error {
 	defer c.mu.Unlock()
 	c.Scan = scan
 	return c.saveLocked()
+}
+
+func (c *Config) DetectionSnapshot() proxy.DetectionConfig {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Detection.Clone()
+}
+
+func (c *Config) SetDetection(detection proxy.DetectionConfig) error {
+	if err := detection.Validate(); err != nil {
+		return err
+	}
+	detection.ApplyDefaults()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Detection = detection.Clone()
+	return c.saveLocked()
+}
+
+func (c *Config) ProfileSnapshot(name string) Profile {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	profile := Profile{SchemaVersion: c.SchemaVersion, Name: name, Scan: c.Scan, Detection: c.Detection.Clone()}
+	profile.Rules = make([]proxy.RuleSpec, len(c.Rules))
+	for i, rule := range c.Rules {
+		profile.Rules[i] = rule.Clone()
+	}
+	return profile
 }
 
 // Save пишет конфиг атомарно: сначала во временный файл рядом, потом rename.

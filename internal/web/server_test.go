@@ -29,6 +29,7 @@ func testServer(t *testing.T, token string) (*Server, *proxy.Manager, *httptest.
 		httpSrv.Close()
 		srv.Close()
 		mgr.StopAll()
+		mgr.Close()
 	})
 	return srv, mgr, httpSrv
 }
@@ -231,5 +232,62 @@ func TestMethodsAndTrafficParametersRejected(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("invalid search mode accepted: %d", resp.StatusCode)
+	}
+}
+
+func TestV1DetectorsAndProfileImport(t *testing.T) {
+	_, mgr, httpSrv := testServer(t, "secret")
+	detectorBody := []byte(`{"name":"Flag","enabled":true,"mode":"regex","pattern":"FLAG\\{[A-Z]+\\}","direction":"in","scope":"stream","score":80,"sensitive":true}`)
+	resp := request(t, httpSrv.Client(), http.MethodPost, httpSrv.URL+"/api/v1/detectors", "secret", detectorBody)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("create detector: %d %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+	if got := len(mgr.DetectionConfig().Detectors); got != 1 {
+		t.Fatalf("detectors=%d", got)
+	}
+
+	resp = request(t, httpSrv.Client(), http.MethodGet, httpSrv.URL+"/api/v1/profile", "secret", nil)
+	profileData, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if bytes.Contains(profileData, []byte("secret")) {
+		t.Fatal("exported profile contains the web token")
+	}
+	var profile config.Profile
+	if err := json.Unmarshal(profileData, &profile); err != nil {
+		t.Fatal(err)
+	}
+	profile.Name = "imported"
+	profile.Rules = []proxy.RuleSpec{{ID: "udp-import", Name: "UDP imported", Protocol: "udp", Enabled: false, ListenHost: "127.0.0.1", ListenPort: 19001, Target: proxy.Endpoint{Host: "127.0.0.1", Port: 19002}}}
+	requestBody, _ := json.Marshal(map[string]interface{}{"profile": profile, "mode": "replace", "dry_run": true})
+	resp = request(t, httpSrv.Client(), http.MethodPost, httpSrv.URL+"/api/v1/profile", "secret", requestBody)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("profile preview: %d %s", resp.StatusCode, body)
+	}
+	var preview struct {
+		Added int `json:"added"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&preview); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if preview.Added != 1 || len(mgr.Specs()) != 0 {
+		t.Fatalf("dry run mutated rules or preview is wrong: %+v", preview)
+	}
+
+	requestBody, _ = json.Marshal(map[string]interface{}{"profile": profile, "mode": "replace", "dry_run": false})
+	resp = request(t, httpSrv.Client(), http.MethodPost, httpSrv.URL+"/api/v1/profile", "secret", requestBody)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("profile apply: %d %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+	if rules := mgr.Specs(); len(rules) != 1 || rules[0].Protocol != "udp" {
+		t.Fatalf("profile was not applied: %+v", rules)
 	}
 }

@@ -5,6 +5,7 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
+const API_BASE = '/api/v1';
 
 let token = localStorage.getItem('cpu_token') || '';
 let state = { rules: [], scan: {}, system: {} };
@@ -37,6 +38,7 @@ function esc(s) {
 async function api(path, opts = {}) {
   const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
   if (token) headers['X-Auth-Token'] = token;
+  if (path.startsWith('/api/') && !path.startsWith('/api/v1/')) path = API_BASE + path.slice(4);
   const res = await fetch(path, Object.assign({}, opts, { headers }));
   if (res.status === 401) {
     showLogin();
@@ -106,7 +108,7 @@ $('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const t = $('login-token').value.trim();
   try {
-    await fetch('/api/login', {
+    await fetch(API_BASE + '/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: t }),
@@ -159,9 +161,11 @@ function render() {
   const sys = state.system || {};
   $('sys-host').textContent = sys.hostname || '';
   $('badge-rules').textContent = (state.rules || []).length;
+  $('badge-findings').textContent = (state.findings || []).length;
   renderRules();
   renderScan();
   renderTrafficSelect();
+  if (openTab === 'findings') renderFindings();
   if (openTab === 'monitor') renderMonitor();
 }
 
@@ -244,6 +248,8 @@ function ruleCard(r) {
       ? '<span class="tag up">цель жива</span>'
       : '<span class="tag down">цель не отвечает</span>');
   }
+  tags.push(`<span class="tag">${esc((s.protocol || 'tcp').toUpperCase())}</span>`);
+  if (s.inspect && s.inspect.enabled) tags.push('<span class="tag warn">инспекция</span>');
   if (r.using_backup) tags.push('<span class="tag warn">на резерве</span>');
   if (s.dump.enabled) tags.push(`<span class="tag">запись ${r.dump_count}</span>`);
   if (s.allow_cidr && s.allow_cidr.length) tags.push('<span class="tag">ACL</span>');
@@ -278,6 +284,7 @@ function ruleCard(r) {
       <span>отдано <b>${fmtBytes(r.bytes_out)}</b></span>
       ${r.failed_conns ? `<span>сбоев <b>${r.failed_conns}</b></span>` : ''}
       ${r.denied_conns ? `<span>отклонено <b>${r.denied_conns}</b></span>` : ''}
+      ${r.target_health && r.target_health.at ? `<span>health <b>${r.target_health.ok ? esc(r.target_health.latency_ms + ' мс') : 'ошибка'}</b></span>` : ''}
       <span>${fmtAgo(r.last_active_unix_ms)}</span>
     </div>
     <div class="rule-error${r.last_error ? '' : ' hidden'}">${esc(r.last_error)}</div>
@@ -318,13 +325,17 @@ function openModal(spec, presets) {
   const s = spec || {
     name: '', listen_host: '0.0.0.0', listen_port: '',
     target: { host: '', port: '' }, backup: null,
-    health: { enabled: false, interval_sec: 3, timeout_ms: 1000, fail_after: 2, rise_after: 2, auto_failover: true, auto_failback: true },
+    protocol: 'tcp', udp_idle_sec: 30,
+    health: { enabled: false, interval_sec: 3, timeout_ms: 1000, fail_after: 2, rise_after: 2, auto_failover: true, auto_failback: true, mode: 'tcp', request_mode: 'text', expect_mode: 'text', http_method: 'GET', http_path: '/', http_status: 200 },
     dump: { enabled: false, max_conns: 50, max_bytes_per: 65536 },
+    inspect: { enabled: true, auto_pin: true },
     allow_cidr: [], max_conns: 0, idle_timeout_sec: 0, dial_timeout_ms: 3000,
     enabled: true,
   };
 
   $('f-name').value = s.name || '';
+  $('f-protocol').value = s.protocol || 'tcp';
+  $('f-udp-idle').value = s.udp_idle_sec || 30;
   $('f-listen-host').value = s.listen_host || '0.0.0.0';
   $('f-listen-port').value = s.listen_port || '';
   $('f-target-host').value = s.target.host || '';
@@ -337,10 +348,22 @@ function openModal(spec, presets) {
   $('f-health-timeout').value = s.health.timeout_ms || 1000;
   $('f-health-fail').value = s.health.fail_after || 2;
   $('f-health-rise').value = s.health.rise_after || 2;
+  $('f-health-mode').value = s.health.mode || 'tcp';
+  $('f-health-request-mode').value = s.health.request_mode || 'text';
+  $('f-health-expect-mode').value = s.health.expect_mode || 'text';
+  $('f-health-request').value = s.health.request || '';
+  $('f-health-expect').value = s.health.expect || '';
+  $('f-health-http-method').value = s.health.http_method || 'GET';
+  $('f-health-http-path').value = s.health.http_path || '/';
+  $('f-health-http-host').value = s.health.http_host || '';
+  $('f-health-http-status').value = s.health.http_status || 200;
+  $('f-health-http-headers').value = Object.entries(s.health.http_headers || {}).map(([key, value]) => `${key}: ${value}`).join('\n');
   $('f-autofail').checked = s.health.auto_failover !== false;
   $('f-autoback').checked = s.health.auto_failback !== false;
 
   $('f-dump').checked = !!s.dump.enabled;
+  $('f-inspect').checked = !!(s.inspect && s.inspect.enabled);
+  $('f-auto-pin').checked = !s.inspect || s.inspect.auto_pin !== false;
   $('f-dump-conns').value = s.dump.max_conns || 50;
   $('f-dump-kb').value = Math.round((s.dump.max_bytes_per || 65536) / 1024);
 
@@ -349,6 +372,7 @@ function openModal(spec, presets) {
   $('f-idle').value = s.idle_timeout_sec || 0;
   $('f-dial').value = s.dial_timeout_ms || 3000;
   $('f-enabled').checked = s.enabled !== false;
+  syncProtocolFields();
 
   // Предзаполнение из результатов скана.
   if (presets) {
@@ -375,15 +399,51 @@ document.addEventListener('keydown', (e) => {
 });
 $('btn-new-rule').addEventListener('click', () => openModal(null));
 
+$('btn-profile-export').addEventListener('click', async () => {
+  try {
+    const profile = await api('/api/profile');
+    const url = URL.createObjectURL(new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `ctf-proxyutils-${(profile.name || 'profile').replace(/[^a-zA-Z0-9_-]/g, '_')}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+$('btn-profile-import').addEventListener('click', () => $('profile-file').click());
+$('profile-file').addEventListener('change', async (event) => {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  try {
+    const profile = JSON.parse(await file.text());
+    const preview = await api('/api/profile', { method: 'POST', body: JSON.stringify({ profile, mode: 'merge', dry_run: true }) });
+    if (!confirm(`Импортировать профиль «${profile.name || file.name}»?\nДобавится: ${preview.added}, обновится: ${preview.updated}, удалится: ${preview.removed}.`)) return;
+    await api('/api/profile', { method: 'POST', body: JSON.stringify({ profile, mode: 'merge', dry_run: false }) });
+    toast('Профиль импортирован', 'ok');
+    poll();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
 $('rule-form').addEventListener('submit', async (e) => {
   e.preventDefault();
 
   const backupHost = $('f-backup-host').value.trim();
   const backupPort = parseInt($('f-backup-port').value, 10);
   const acl = $('f-acl').value.split(',').map((s) => s.trim()).filter(Boolean);
+  let httpHeaders;
+  try { httpHeaders = TrafficUtils.parseHeaderLines($('f-health-http-headers').value); }
+  catch (err) {
+    $('modal-error').textContent = err.message;
+    $('modal-error').classList.remove('hidden');
+    return;
+  }
 
   const spec = {
     name: $('f-name').value.trim(),
+    protocol: $('f-protocol').value,
+    udp_idle_sec: parseInt($('f-udp-idle').value, 10) || 30,
     routing_mode: editingId ? ((state.rules || []).find((r) => r.spec.id === editingId)?.spec.routing_mode || 'auto') : 'auto',
     enabled: $('f-enabled').checked,
     listen_host: $('f-listen-host').value.trim() || '0.0.0.0',
@@ -401,12 +461,23 @@ $('rule-form').addEventListener('submit', async (e) => {
       rise_after: parseInt($('f-health-rise').value, 10),
       auto_failover: $('f-autofail').checked,
       auto_failback: $('f-autoback').checked,
+      mode: $('f-health-mode').value,
+      request: $('f-health-request').value,
+      request_mode: $('f-health-request-mode').value,
+      expect: $('f-health-expect').value,
+      expect_mode: $('f-health-expect-mode').value,
+      http_method: $('f-health-http-method').value.trim() || 'GET',
+      http_path: $('f-health-http-path').value.trim() || '/',
+      http_host: $('f-health-http-host').value.trim(),
+      http_status: parseInt($('f-health-http-status').value, 10) || 0,
+      http_headers: httpHeaders,
     },
     dump: {
       enabled: $('f-dump').checked,
       max_conns: parseInt($('f-dump-conns').value, 10),
       max_bytes_per: parseInt($('f-dump-kb').value, 10) * 1024,
     },
+    inspect: { enabled: $('f-inspect').checked, auto_pin: $('f-auto-pin').checked },
     allow_cidr: acl,
     max_conns: parseInt($('f-maxconns').value, 10) || 0,
     idle_timeout_sec: parseInt($('f-idle').value, 10) || 0,
@@ -842,6 +913,120 @@ $('traffic-auto').addEventListener('change', (e) => {
   }
 });
 
+/* ── Подозрительный трафик и детекторы ─────────────────────── */
+function severityLabel(value) {
+  return ({ critical: 'критический', high: 'высокий', medium: 'средний', low: 'низкий' })[value] || value;
+}
+
+function syncProtocolFields() {
+  const udp = $('f-protocol').value === 'udp';
+  $('f-udp-idle').disabled = !udp;
+  const httpOption = $('f-health-mode').querySelector('option[value="http"]');
+  httpOption.disabled = udp;
+  const tcpOption = $('f-health-mode').querySelector('option[value="tcp"]');
+  tcpOption.disabled = udp;
+  if (udp && $('f-health-mode').value !== 'payload') $('f-health-mode').value = 'payload';
+}
+
+$('f-protocol').addEventListener('change', syncProtocolFields);
+
+function renderFindings() {
+  const query = $('findings-query').value.trim().toLocaleLowerCase('ru-RU');
+  const minimum = parseInt($('findings-score').value, 10) || 0;
+  const all = state.findings || [];
+  const items = all.filter((finding) => {
+    if (finding.score < minimum) return false;
+    const signalText = (finding.signals || []).map((signal) => `${signal.detector_name} ${signal.reason} ${signal.excerpt || ''}`).join(' ');
+    return !query || `${finding.rule_name} ${finding.remote_addr} ${finding.target} ${signalText}`.toLocaleLowerCase('ru-RU').includes(query);
+  });
+  $('findings-summary').textContent = `${all.length} находок · ${(state.detection && state.detection.dropped) || 0} пропущено`;
+  $('findings-empty').classList.toggle('hidden', items.length > 0);
+  $('findings-list').innerHTML = items.map((finding) => `<article class="finding severity-${esc(finding.severity)}">
+    <div class="finding-score"><strong>${finding.score}</strong><span>/100</span></div>
+    <div class="finding-content"><div class="finding-head"><b>${esc(finding.rule_name || finding.rule_id)}</b><span class="tag ${finding.severity === 'critical' || finding.severity === 'high' ? 'down' : 'warn'}">${esc(severityLabel(finding.severity))}</span><span class="tag">${esc((finding.protocol || 'tcp').toUpperCase())}</span>${finding.auto_pinned ? '<span class="tag warn">закреплено</span>' : ''}</div>
+    <div class="finding-meta">${esc(finding.remote_addr)} → ${esc(finding.target)} · ${fmtTime(finding.at)}</div>
+    <div class="finding-signals">${(finding.signals || []).map((signal) => `<div><b>+${signal.score} ${esc(signal.detector_name)}</b>${signal.excerpt ? `<code>${esc(signal.excerpt)}</code>` : ''}</div>`).join('')}</div></div>
+    <button class="btn btn-sm btn-ghost" data-finding-traffic="${esc(finding.rule_id)}" data-connection="${esc(finding.connection_id)}">Открыть запись</button>
+  </article>`).join('');
+  renderDetectors();
+}
+
+function renderDetectors() {
+  const config = (state.detection && state.detection.config) || {};
+  if (!['INPUT', 'SELECT'].includes(document.activeElement && document.activeElement.tagName)) {
+    $('detector-enabled').checked = !!config.enabled;
+    $('detector-builtins').checked = !!config.builtins;
+    $('detector-threshold').value = config.threshold || 25;
+    $('detector-autopin').value = config.auto_pin_score || 60;
+  }
+  $('detectors-list').innerHTML = (config.detectors || []).map((detector) => `<div class="detector-row">
+    <label class="check"><input type="checkbox" data-detector-toggle="${esc(detector.id)}" ${detector.enabled ? 'checked' : ''}> <b>${esc(detector.name)}</b></label>
+    <span class="tag">${esc(detector.mode)}${detector.case_insensitive ? ' · i' : ''}</span><span class="tag">${esc(detector.scope || 'stream')}</span><span class="tag warn">+${detector.score}</span>${detector.rule_ids && detector.rule_ids.length ? `<span class="tag">${detector.rule_ids.length} правил</span>` : ''}
+    <code>${detector.sensitive ? '[скрытый шаблон]' : esc(detector.pattern)}</code>
+    <button class="btn btn-sm btn-ghost btn-danger" data-detector-delete="${esc(detector.id)}">Удалить</button>
+  </div>`).join('') || '<p class="dim">Пользовательских детекторов нет. Встроенные эвристики работают отдельно.</p>';
+}
+
+$('findings-query').addEventListener('input', renderFindings);
+$('findings-score').addEventListener('change', renderFindings);
+$('btn-findings-clear').addEventListener('click', async () => {
+  if (!confirm('Очистить журнал подозрительного трафика? Закреплённые записи останутся.')) return;
+  try { await api('/api/findings', { method: 'DELETE' }); await poll(); } catch (err) { toast(err.message, 'err'); }
+});
+
+$('findings-list').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-finding-traffic]');
+  if (!button) return;
+  document.querySelector('.tab[data-tab="traffic"]').click();
+  $('traffic-rule').value = button.dataset.findingTraffic;
+  expandedConns.clear();
+  expandedConns.add(button.dataset.connection);
+  resetTraffic();
+});
+
+$('btn-detector-settings').addEventListener('click', async () => {
+  const config = Object.assign({}, (state.detection && state.detection.config) || {}, {
+    enabled: $('detector-enabled').checked,
+    builtins: $('detector-builtins').checked,
+    threshold: parseInt($('detector-threshold').value, 10),
+    auto_pin_score: parseInt($('detector-autopin').value, 10),
+  });
+  try { await api('/api/detectors', { method: 'PUT', body: JSON.stringify(config) }); toast('Настройки детекторов сохранены', 'ok'); poll(); }
+  catch (err) { toast(err.message, 'err'); }
+});
+
+$('detector-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const detector = {
+    name: $('detector-name').value.trim(), pattern: $('detector-pattern').value,
+    enabled: true, mode: $('detector-mode').value, scope: $('detector-scope').value,
+    direction: $('detector-direction').value, score: parseInt($('detector-score').value, 10),
+    rule_ids: $('detector-rules').value.split(',').map((item) => item.trim()).filter(Boolean),
+    case_insensitive: $('detector-case-insensitive').checked,
+    sensitive: $('detector-sensitive').checked,
+  };
+  try {
+    await api('/api/detectors', { method: 'POST', body: JSON.stringify(detector) });
+    $('detector-form').reset(); $('detector-score').value = 60; toast('Детектор добавлен', 'ok'); poll();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+$('detectors-list').addEventListener('change', async (event) => {
+  const input = event.target.closest('[data-detector-toggle]');
+  if (!input) return;
+  const detector = ((state.detection && state.detection.config && state.detection.config.detectors) || []).find((item) => item.id === input.dataset.detectorToggle);
+  if (!detector) return;
+  try { await api(`/api/detectors/${encodeURIComponent(detector.id)}`, { method: 'PUT', body: JSON.stringify(Object.assign({}, detector, { enabled: input.checked })) }); poll(); }
+  catch (err) { input.checked = !input.checked; toast(err.message, 'err'); }
+});
+
+$('detectors-list').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-detector-delete]');
+  if (!button || !confirm('Удалить этот детектор?')) return;
+  try { await api(`/api/detectors/${encodeURIComponent(button.dataset.detectorDelete)}`, { method: 'DELETE' }); poll(); }
+  catch (err) { toast(err.message, 'err'); }
+});
+
 /* ── Нагрузка и события ──────────────────────────────────────── */
 function renderMonitor() {
   const samples = state.metrics || [];
@@ -917,6 +1102,7 @@ document.querySelectorAll('.tab').forEach((tab) => {
     });
     if (openTab === 'traffic') loadTraffic();
     else invalidateTraffic();
+    if (openTab === 'findings') renderFindings();
     if (openTab === 'monitor') renderMonitor();
   });
 });
@@ -940,7 +1126,7 @@ document.addEventListener('visibilitychange', () => {
   }
 
   try {
-    const ping = await fetch('/api/ping').then((r) => r.json());
+    const ping = await fetch(API_BASE + '/ping').then((r) => r.json());
     if (!ping.auth) { showApp(); return; } // запущено с -no-auth
   } catch (e) { /* дальше разберёмся по /api/state */ }
 

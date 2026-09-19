@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { escapeHTML, decodeBytes, joinStream, buildSearch, chartSeries } = require('./traffic-utils.js');
+const { escapeHTML, decodeBytes, joinStream, buildSearch, parseHeaderLines, chartSeries } = require('./traffic-utils.js');
 
 test('untrusted service and traffic text cannot add HTML or attributes', () => {
   const input = '<img src=x onerror="alert(1)"> & \'test\'';
@@ -49,6 +49,15 @@ test('empty search leaves optional filters absent', () => {
   assert.equal(query.get('mode'), 'text');
   assert.equal(query.get('dir'), 'any');
   for (const key of ['from', 'to', 'pinned', 'remote']) assert.equal(query.has(key), false);
+});
+
+test('health headers preserve colons in values and reject malformed names', () => {
+  assert.deepEqual(parseHeaderLines('Authorization: Bearer a:b\r\nX-Probe: yes\n'), {
+    Authorization: 'Bearer a:b',
+    'X-Probe': 'yes',
+  });
+  assert.throws(() => parseHeaderLines('missing separator'), /Некорректный/);
+  assert.throws(() => parseHeaderLines('Bad Name: value'), /Некорректный/);
 });
 
 test('chart x coordinates represent elapsed time and share a y scale', () => {

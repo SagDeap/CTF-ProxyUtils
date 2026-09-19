@@ -1,0 +1,543 @@
+openapi: 3.1.0
+info:
+  title: CTF-ProxyUtils API
+  version: 1.0.0
+  description: Управление TCP/UDP-пробросами, анализом трафика, сканером и профилями.
+servers:
+  - url: http://127.0.0.1:8420/api/v1
+security:
+  - tokenHeader: []
+  - bearerAuth: []
+paths:
+  /ping:
+    get:
+      summary: Проверить API и получить версию
+      security: []
+      responses:
+        '200':
+          description: Состояние процесса
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  version: { type: string }
+                  auth: { type: boolean }
+                  uptime_s: { type: integer }
+                  api: { const: v1 }
+  /login:
+    post:
+      summary: Проверить токен
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '401': { $ref: '#/components/responses/Error' }
+  /state:
+    get:
+      summary: Получить полный снимок для панели
+      responses:
+        '200':
+          description: Правила, скан, события, метрики, находки и конфигурация детекторов
+          content:
+            application/json:
+              schema: { type: object }
+  /interfaces:
+    get:
+      summary: Сетевые интерфейсы и подсеть по умолчанию
+      responses:
+        '200':
+          description: Интерфейсы
+          content:
+            application/json:
+              schema: { type: object }
+  /rules:
+    get:
+      summary: Список правил и runtime-состояния
+      responses:
+        '200':
+          description: Правила
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RuleSnapshot' }
+    post:
+      summary: Создать правило
+      requestBody: { $ref: '#/components/requestBodies/Rule' }
+      responses:
+        '201':
+          description: Правило создано
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuleSnapshot' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /rules/{id}:
+    parameters:
+      - $ref: '#/components/parameters/RuleID'
+    get:
+      summary: Получить правило
+      responses:
+        '200':
+          description: Правило
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuleSnapshot' }
+        '404': { $ref: '#/components/responses/Error' }
+    put:
+      summary: Полностью заменить настройки правила
+      requestBody: { $ref: '#/components/requestBodies/Rule' }
+      responses:
+        '200':
+          description: Правило обновлено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuleSnapshot' }
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: Удалить правило
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+        '404': { $ref: '#/components/responses/Error' }
+  /rules/{id}/toggle:
+    parameters: [{ $ref: '#/components/parameters/RuleID' }]
+    post:
+      summary: Включить или выключить правило
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: Новое состояние
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuleSnapshot' }
+        '409': { $ref: '#/components/responses/Error' }
+  /rules/{id}/switch:
+    parameters: [{ $ref: '#/components/parameters/RuleID' }]
+    post:
+      summary: Выбрать режим маршрутизации
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode: { type: string, enum: [auto, primary, backup] }
+      responses:
+        '200':
+          description: Новое состояние
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuleSnapshot' }
+        '400': { $ref: '#/components/responses/Error' }
+  /rules/{id}/reset:
+    parameters: [{ $ref: '#/components/parameters/RuleID' }]
+    post:
+      summary: Сбросить счётчики правила
+      responses:
+        '200':
+          description: Новое состояние
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuleSnapshot' }
+  /rules/{id}/dumps:
+    parameters: [{ $ref: '#/components/parameters/RuleID' }]
+    get:
+      summary: Получить или найти записи трафика
+      parameters:
+        - { name: summary, in: query, schema: { type: boolean } }
+        - { name: q, in: query, schema: { type: string } }
+        - { name: mode, in: query, schema: { type: string, enum: [text, hex, regex] } }
+        - { name: dir, in: query, schema: { type: string, enum: [any, in, out] } }
+        - { name: remote, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: pinned, in: query, schema: { type: boolean } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500 } }
+      responses:
+        '200':
+          description: Записи или страница метаданных
+          content:
+            application/json:
+              schema: { type: object }
+    delete:
+      summary: Очистить незакреплённые записи
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+  /rules/{id}/dumps/{connection_id}:
+    parameters:
+      - $ref: '#/components/parameters/RuleID'
+      - $ref: '#/components/parameters/ConnectionID'
+    get:
+      summary: Получить запись с чанками
+      responses:
+        '200':
+          description: Запись
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConnectionDump' }
+        '404': { $ref: '#/components/responses/Error' }
+  /rules/{id}/dumps/{connection_id}/pin:
+    parameters:
+      - $ref: '#/components/parameters/RuleID'
+      - $ref: '#/components/parameters/ConnectionID'
+    post:
+      summary: Закрепить или открепить запись
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pinned]
+              properties:
+                pinned: { type: boolean }
+      responses:
+        '200':
+          description: Обновлённая запись
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConnectionDump' }
+  /detectors:
+    get:
+      summary: Получить конфигурацию детекторов
+      responses:
+        '200':
+          description: Конфигурация
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DetectionConfig' }
+    put:
+      summary: Заменить конфигурацию детекторов
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DetectionConfig' }
+      responses:
+        '200':
+          description: Конфигурация
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DetectionConfig' }
+    post:
+      summary: Добавить детектор
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Detector' }
+      responses:
+        '201':
+          description: Детектор
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Detector' }
+  /detectors/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      summary: Заменить детектор
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Detector' }
+      responses:
+        '200':
+          description: Конфигурация
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DetectionConfig' }
+    delete:
+      summary: Удалить детектор
+      responses:
+        '200':
+          description: Конфигурация
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DetectionConfig' }
+  /findings:
+    get:
+      summary: Найти подозрительные соединения
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: rule_id, in: query, schema: { type: string } }
+        - { name: min_score, in: query, schema: { type: integer, minimum: 0, maximum: 100 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 } }
+      responses:
+        '200':
+          description: Находки
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Finding' }
+                  total: { type: integer }
+                  dropped: { type: integer }
+    delete:
+      summary: Очистить находки
+      responses:
+        '200': { $ref: '#/components/responses/OK' }
+  /profile:
+    get:
+      summary: Экспортировать профиль без токена панели
+      responses:
+        '200':
+          description: Профиль
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Profile' }
+    post:
+      summary: Проверить или импортировать профиль
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profile, dry_run]
+              properties:
+                profile: { $ref: '#/components/schemas/Profile' }
+                mode: { type: string, enum: [merge, replace], default: merge }
+                dry_run: { type: boolean }
+      responses:
+        '200':
+          description: Предпросмотр изменений
+          content:
+            application/json:
+              schema: { type: object }
+        '409': { $ref: '#/components/responses/Error' }
+  /scan:
+    get:
+      summary: Состояние сканера
+      responses:
+        '200': { description: Состояние }
+    post:
+      summary: Запустить сканирование
+      responses:
+        '202': { description: Скан запущен }
+    delete:
+      summary: Остановить сканирование
+      responses:
+        '200': { description: Скан остановлен }
+components:
+  securitySchemes:
+    tokenHeader:
+      type: apiKey
+      in: header
+      name: X-Auth-Token
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    RuleID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    ConnectionID:
+      name: connection_id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+  requestBodies:
+    Rule:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Rule' }
+  responses:
+    OK:
+      description: Успешно
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean }
+    Error:
+      description: Ошибка
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Endpoint:
+      type: object
+      required: [host, port]
+      properties:
+        host: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+    Health:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        interval_sec: { type: integer }
+        timeout_ms: { type: integer }
+        fail_after: { type: integer }
+        rise_after: { type: integer }
+        auto_failover: { type: boolean }
+        auto_failback: { type: boolean }
+        mode: { type: string, enum: [tcp, payload, http] }
+        request: { type: string }
+        request_mode: { type: string, enum: [text, hex] }
+        expect: { type: string }
+        expect_mode: { type: string, enum: [text, hex, regex] }
+        http_method: { type: string }
+        http_path: { type: string }
+        http_host: { type: string }
+        http_status: { type: integer }
+        http_headers:
+          type: object
+          additionalProperties: { type: string }
+    Rule:
+      type: object
+      required: [listen_port, target]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        protocol: { type: string, enum: [tcp, udp], default: tcp }
+        listen_host: { type: string, default: 0.0.0.0 }
+        listen_port: { type: integer, minimum: 1, maximum: 65535 }
+        target: { $ref: '#/components/schemas/Endpoint' }
+        backup: { $ref: '#/components/schemas/Endpoint' }
+        routing_mode: { type: string, enum: [auto, primary, backup] }
+        udp_idle_sec: { type: integer, minimum: 1, maximum: 3600 }
+        health: { $ref: '#/components/schemas/Health' }
+        inspect:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            auto_pin: { type: boolean }
+        dump:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            max_conns: { type: integer }
+            max_bytes_per: { type: integer }
+        allow_cidr:
+          type: array
+          items: { type: string }
+        max_conns: { type: integer }
+        idle_timeout_sec: { type: integer }
+        dial_timeout_ms: { type: integer }
+    RuleSnapshot:
+      type: object
+      properties:
+        spec: { $ref: '#/components/schemas/Rule' }
+        running: { type: boolean }
+        target_up: { type: boolean }
+        backup_up: { type: boolean }
+        using_backup: { type: boolean }
+        active_conns: { type: integer }
+        total_conns: { type: integer }
+        bytes_in: { type: integer }
+        bytes_out: { type: integer }
+        last_error: { type: string }
+    Detector:
+      type: object
+      required: [name, pattern]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        mode: { type: string, enum: [text, hex, regex] }
+        pattern: { type: string }
+        direction: { type: string, enum: [any, in, out] }
+        scope: { type: string, enum: [stream, http_headers, http_path, http_body] }
+        score: { type: integer, minimum: 1, maximum: 100 }
+        case_insensitive: { type: boolean }
+        sensitive: { type: boolean }
+        rule_ids:
+          type: array
+          items: { type: string }
+    DetectionConfig:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        builtins: { type: boolean }
+        threshold: { type: integer, minimum: 1, maximum: 100 }
+        auto_pin_score: { type: integer, minimum: 1, maximum: 100 }
+        max_findings: { type: integer, minimum: 1, maximum: 5000 }
+        buffer_bytes: { type: integer, minimum: 4096, maximum: 4194304 }
+        detectors:
+          type: array
+          items: { $ref: '#/components/schemas/Detector' }
+    Finding:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        rule_id: { type: string }
+        rule_name: { type: string }
+        connection_id: { type: integer, format: int64 }
+        remote_addr: { type: string }
+        target: { type: string }
+        protocol: { type: string }
+        score: { type: integer }
+        severity: { type: string, enum: [low, medium, high, critical] }
+        auto_pinned: { type: boolean }
+        signals:
+          type: array
+          items: { type: object }
+    ConnectionDump:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        protocol: { type: string }
+        remote_addr: { type: string }
+        target: { type: string }
+        pinned: { type: boolean }
+        risk_score: { type: integer }
+        chunks:
+          type: array
+          items:
+            type: object
+            properties:
+              at: { type: string, format: date-time }
+              dir: { type: string, enum: [in, out] }
+              data: { type: string, contentEncoding: base64 }
+    Profile:
+      type: object
+      required: [schema_version, scan, detection, rules]
+      properties:
+        schema_version: { type: integer, maximum: 1 }
+        name: { type: string }
+        exported_at: { type: string, format: date-time }
+        scan: { type: object }
+        detection: { $ref: '#/components/schemas/DetectionConfig' }
+        rules:
+          type: array
+          items: { $ref: '#/components/schemas/Rule' }

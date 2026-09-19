@@ -25,7 +25,7 @@ jobs:
       - name: Race detector
         if: runner.os == 'Linux'
         run: go test -race ./...
-      - run: node --test internal/web/static/_traffic-utils.test.js
+      - run: node --test internal/web/static/*.test.js
       - name: 32-bit tests
         if: runner.os == 'Linux'
         run: GOARCH=386 CGO_ENABLED=0 go test ./...

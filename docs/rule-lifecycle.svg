@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="290" viewBox="0 0 1040 290" role="img" aria-labelledby="title desc">
+  <title id="title">Жизненный цикл правила проброса</title>
+  <desc id="desc">Правило проходит проверку, занимает TCP или UDP-порт, запускает передачу и фоновые компоненты, а затем сохраняется.</desc>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#59d39e"/></marker></defs>
+  <rect width="1040" height="290" rx="18" fill="#0d1117"/>
+  <g font-family="Segoe UI,Arial,sans-serif">
+    <text x="32" y="40" fill="#8b9bad" font-size="13" letter-spacing="2">RULE LIFECYCLE</text>
+    <g fill="#151b23" stroke="#32404f"><rect x="32" y="91" width="170" height="106" rx="13"/><rect x="234" y="91" width="170" height="106" rx="13"/><rect x="436" y="91" width="170" height="106" rx="13"/><rect x="638" y="91" width="170" height="106" rx="13"/><rect x="840" y="91" width="168" height="106" rx="13"/></g>
+    <g fill="none" stroke="#59d39e" stroke-width="3" marker-end="url(#a)"><path d="M202 144H222"/><path d="M404 144H424"/><path d="M606 144H626"/><path d="M808 144H828"/></g>
+    <g fill="#edf4f8" font-size="17" font-weight="600"><text x="55" y="128">Форма / API</text><text x="257" y="128">Валидация</text><text x="459" y="128">Bind порта</text><text x="661" y="128">Workers</text><text x="863" y="128">config.json</text></g>
+    <g fill="#91a2b4" font-size="14"><text x="55" y="158">RuleSpec</text><text x="55" y="180">TCP или UDP</text><text x="257" y="158">ACL · лимиты</text><text x="257" y="180">конфликты</text><text x="459" y="158">сначала новый</text><text x="459" y="180">затем swap</text><text x="661" y="158">proxy · health</text><text x="661" y="180">capture · inspect</text><text x="863" y="158">atomic rename</text><text x="863" y="180">0600</text></g>
+    <text x="32" y="250" fill="#91a2b4" font-size="14">Неудачный update возвращает старый слушатель; активные соединения закрываются только при смене bind/protocol или отключении правила.</text>
+  </g>
+</svg>

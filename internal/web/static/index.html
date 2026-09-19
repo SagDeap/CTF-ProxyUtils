@@ -27,6 +27,7 @@
       <button class="tab active" data-tab="rules"><span class="tab-icon" aria-hidden="true">↗</span>Пробросы <span class="badge" id="badge-rules">0</span></button>
       <button class="tab" data-tab="scan"><span class="tab-icon" aria-hidden="true">⌁</span>Сканер сети</button>
       <button class="tab" data-tab="traffic"><span class="tab-icon" aria-hidden="true">⇄</span>Трафик</button>
+      <button class="tab" data-tab="findings"><span class="tab-icon" aria-hidden="true">!</span>Риски <span class="badge" id="badge-findings">0</span></button>
       <button class="tab" data-tab="monitor"><span class="tab-icon" aria-hidden="true">⌁</span>Мониторинг</button>
     </nav>
     <div class="sysinfo">
@@ -45,6 +46,9 @@
       </div>
       <div class="toolbar">
         <button class="btn btn-primary" id="btn-new-rule">+ Новый проброс</button>
+        <button class="btn btn-ghost" id="btn-profile-export">Экспорт профиля</button>
+        <button class="btn btn-ghost" id="btn-profile-import">Импорт профиля</button>
+        <input type="file" id="profile-file" accept="application/json,.json" class="hidden">
       </div>
       <div id="rules-list" class="rules"></div>
       <div class="empty hidden" id="rules-empty">
@@ -136,6 +140,44 @@
       </div>
     </section>
 
+    <section id="tab-findings" class="tab-panel">
+      <div class="page-heading">
+        <div><span class="eyebrow">THREAT SIGNALS</span><h1>Подозрительный трафик</h1><p>Объяснимые сигналы, оценка риска и связанные записи.</p></div>
+        <div class="totals" id="findings-summary"></div>
+      </div>
+      <div class="toolbar">
+        <input id="findings-query" type="text" placeholder="IP, правило или причина" aria-label="Поиск по находкам">
+        <select id="findings-score" class="select" aria-label="Минимальный риск"><option value="0">Любой риск</option><option value="35">От 35</option><option value="60">От 60</option><option value="80">От 80</option></select>
+        <button class="btn btn-ghost" id="btn-findings-clear">Очистить находки</button>
+      </div>
+      <div id="findings-list" class="findings"></div>
+      <div class="empty hidden" id="findings-empty"><p>Подозрительных соединений пока нет.</p><p class="dim">Включите инспекцию в правиле и настройте собственные сигнатуры.</p></div>
+
+      <details class="detector-settings section" open>
+        <summary>Детекторы</summary>
+        <div class="detector-global">
+          <label class="check"><input type="checkbox" id="detector-enabled"> инспекция включена глобально</label>
+          <label class="check"><input type="checkbox" id="detector-builtins"> встроенные эвристики</label>
+          <div class="field narrow"><label for="detector-threshold">Показывать от</label><input id="detector-threshold" type="number" min="1" max="100"></div>
+          <div class="field narrow"><label for="detector-autopin">Закреплять от</label><input id="detector-autopin" type="number" min="1" max="100"></div>
+          <button class="btn btn-ghost" id="btn-detector-settings">Сохранить</button>
+        </div>
+        <form id="detector-form" class="detector-form">
+          <div class="field"><label for="detector-name">Название</label><input id="detector-name" type="text" placeholder="Флаг команды" required></div>
+          <div class="field grow"><label for="detector-pattern">Шаблон</label><input id="detector-pattern" type="text" placeholder="FLAG\{[A-Za-z0-9_-]+\}" required></div>
+          <div class="field compact"><label for="detector-mode">Формат</label><select id="detector-mode" class="select"><option value="regex">Regex</option><option value="text">Текст</option><option value="hex">Hex</option></select></div>
+          <div class="field compact"><label for="detector-scope">Область</label><select id="detector-scope" class="select"><option value="stream">Поток</option><option value="http_headers">HTTP-заголовки</option><option value="http_path">HTTP-путь</option><option value="http_body">HTTP-тело</option></select></div>
+          <div class="field compact"><label for="detector-direction">Направление</label><select id="detector-direction" class="select"><option value="any">Оба</option><option value="in">От клиента</option><option value="out">От сервиса</option></select></div>
+          <div class="field narrow"><label for="detector-score">Баллы</label><input id="detector-score" type="number" value="60" min="1" max="100"></div>
+          <div class="field"><label for="detector-rules">Только правила</label><input id="detector-rules" type="text" placeholder="ID через запятую; пусто — все"></div>
+          <label class="check"><input id="detector-case-insensitive" type="checkbox"> без учёта регистра</label>
+          <label class="check"><input id="detector-sensitive" type="checkbox"> скрывать совпадение</label>
+          <button type="submit" class="btn btn-primary">Добавить</button>
+        </form>
+        <div id="detectors-list" class="detectors-list"></div>
+      </details>
+    </section>
+
     <section id="tab-monitor" class="tab-panel">
       <div class="page-heading monitor-intro"><div><span class="eyebrow">LIVE TELEMETRY</span><h1>Мониторинг</h1><p>Нагрузка и журнал важных событий.</p></div><span class="dim" id="metrics-window">Все пробросы · последние 5 минут</span></div>
       <div id="metric-cards" class="metric-cards"></div>
@@ -159,6 +201,11 @@
       <div class="field">
         <label>Название</label>
         <input type="text" id="f-name" placeholder="например: сервис на ноуте Пети">
+      </div>
+
+      <div class="row">
+        <div class="field narrow"><label for="f-protocol">Протокол</label><select id="f-protocol" class="select"><option value="tcp">TCP</option><option value="udp">UDP</option></select></div>
+        <div class="field narrow"><label for="f-udp-idle">UDP TTL, с</label><input type="number" id="f-udp-idle" value="30" min="1" max="3600"></div>
       </div>
 
       <div class="row">
@@ -186,6 +233,20 @@
         <label class="check">
           <input type="checkbox" id="f-health"> проверять, жив ли адрес назначения
         </label>
+        <div class="row">
+          <div class="field"><label for="f-health-mode">Тип проверки</label><select id="f-health-mode" class="select"><option value="tcp">Подключение</option><option value="payload">Запрос и ответ</option><option value="http">HTTP</option></select></div>
+          <div class="field"><label for="f-health-request-mode">Формат запроса</label><select id="f-health-request-mode" class="select"><option value="text">Текст</option><option value="hex">Hex</option></select></div>
+          <div class="field"><label for="f-health-expect-mode">Проверка ответа</label><select id="f-health-expect-mode" class="select"><option value="text">Текст</option><option value="hex">Hex</option><option value="regex">Regex</option></select></div>
+        </div>
+        <div class="field"><label for="f-health-request">Запрос или HTTP body</label><textarea id="f-health-request" rows="3" placeholder="GET /health или полезная нагрузка"></textarea></div>
+        <div class="field"><label for="f-health-expect">Ожидаемый ответ</label><input type="text" id="f-health-expect" placeholder="OK или регулярное выражение"></div>
+        <div class="row">
+          <div class="field narrow"><label for="f-health-http-method">HTTP метод</label><input type="text" id="f-health-http-method" value="GET"></div>
+          <div class="field"><label for="f-health-http-path">HTTP путь</label><input type="text" id="f-health-http-path" value="/"></div>
+          <div class="field"><label for="f-health-http-host">Host</label><input type="text" id="f-health-http-host" placeholder="необязательно"></div>
+          <div class="field narrow"><label for="f-health-http-status">Статус</label><input type="number" id="f-health-http-status" value="200" min="0" max="599"></div>
+        </div>
+        <div class="field"><label for="f-health-http-headers">HTTP-заголовки</label><textarea id="f-health-http-headers" rows="2" placeholder="Authorization: Bearer ...&#10;X-Health-Check: ctf-proxy"></textarea></div>
         <div class="row">
           <div class="field narrow">
             <label>Интервал, с</label>
@@ -224,6 +285,8 @@
 
       <details class="section">
         <summary>Запись трафика</summary>
+        <label class="check"><input type="checkbox" id="f-inspect" checked> анализировать подозрительный трафик</label>
+        <label class="check"><input type="checkbox" id="f-auto-pin" checked> автоматически закреплять высокий риск</label>
         <label class="check">
           <input type="checkbox" id="f-dump"> писать всё, что проходит через правило
         </label>

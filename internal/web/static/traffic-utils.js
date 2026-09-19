@@ -41,6 +41,20 @@
     return query.toString();
   }
 
+  function parseHeaderLines(value) {
+    const headers = {};
+    for (const line of String(value || '').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const separator = line.indexOf(':');
+      if (separator < 1) throw new Error(`Некорректный HTTP-заголовок: ${line}`);
+      const name = line.slice(0, separator).trim();
+      const headerValue = line.slice(separator + 1).trim();
+      if (!name || /[\s:]/.test(name) || /[\r\n]/.test(headerValue)) throw new Error(`Некорректный HTTP-заголовок: ${line}`);
+      headers[name] = headerValue;
+    }
+    return headers;
+  }
+
   // Use actual sample times so a pause in sampling does not compress the x-axis.
   function chartSeries(samples, keys, width = 560, height = 132) {
     const data = (samples || []).filter((s) => Number.isFinite(Date.parse(s.at)));
@@ -56,7 +70,7 @@
     return { paths, max, start, end };
   }
 
-  const exported = { escapeHTML, decodeBytes, joinStream, buildSearch, chartSeries };
+  const exported = { escapeHTML, decodeBytes, joinStream, buildSearch, parseHeaderLines, chartSeries };
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   else root.TrafficUtils = exported;
 })(typeof globalThis === 'undefined' ? this : globalThis);

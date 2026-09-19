@@ -1,55 +1,91 @@
-# API
+# REST API v1
 
-Базовый адрес: `http://127.0.0.1:8420`. JSON-запросы требуют
-`Content-Type: application/json`. Передавай токен в `X-Auth-Token` или
-`Authorization: Bearer TOKEN`. Cookie не принимаются.
+Базовый путь: `/api/v1`. Старые маршруты `/api/*` для правил, сканера и состояния остаются алиасами в v1.0.
+
+JSON-запросы требуют `Content-Type: application/json`. Токен передаётся одним из заголовков:
+
+```text
+X-Auth-Token: TOKEN
+Authorization: Bearer TOKEN
+```
+
+`GET /api/v1/ping` и `POST /api/v1/login` доступны без авторизации. Ошибки возвращаются как `{ "error": "..." }`.
+
+## Маршруты
 
 | Метод | Путь | Действие |
 |---|---|---|
-| GET | `/api/ping` | Версия и состояние авторизации, без токена |
-| POST | `/api/login` | Проверка `{ "token": "..." }`, без создания cookie |
-| GET | `/api/state` | Правила, скан, события, графики и настройки |
-| GET / POST | `/api/rules` | Список / создание правила |
-| GET / PUT / DELETE | `/api/rules/{id}` | Чтение / замена / удаление правила |
-| POST | `/api/rules/{id}/toggle` | `{ "enabled": true }` |
-| POST | `/api/rules/{id}/switch` | `{ "mode": "auto" }`, также `primary` / `backup` |
-| POST | `/api/rules/{id}/reset` | Сброс счётчиков |
-| GET | `/api/rules/{id}/dumps?summary=1` | Поиск и страницы метаданных |
-| GET | `/api/rules/{id}/dumps/{conn_id}` | Полная запись; `chunks[].data` в base64 |
-| POST | `/api/rules/{id}/dumps/{conn_id}/pin` | `{ "pinned": true }` |
-| DELETE | `/api/rules/{id}/dumps` | Очистка незакреплённого трафика |
-| GET / POST / DELETE | `/api/scan` | Состояние / запуск / остановка скана |
-| GET | `/api/interfaces` | Интерфейсы и подсети |
+| GET | `/ping` | версия, uptime и состояние авторизации |
+| POST | `/login` | проверить `{ "token": "..." }` |
+| GET | `/state` | снимок панели: правила, находки, события, метрики и скан |
+| GET / POST | `/rules` | список / создать правило |
+| GET / PUT / DELETE | `/rules/{id}` | прочитать / заменить / удалить правило |
+| POST | `/rules/{id}/toggle` | `{ "enabled": true }` |
+| POST | `/rules/{id}/switch` | `{ "mode": "auto|primary|backup" }` |
+| POST | `/rules/{id}/reset` | сбросить счётчики |
+| GET / DELETE | `/rules/{id}/dumps` | найти / очистить незакреплённые записи |
+| GET | `/rules/{id}/dumps/{conn_id}` | полная запись; `chunks[].data` — base64 |
+| POST | `/rules/{id}/dumps/{conn_id}/pin` | `{ "pinned": true }` |
+| GET / PUT / POST | `/detectors` | конфигурация / заменить / добавить детектор |
+| PUT / DELETE | `/detectors/{id}` | заменить / удалить детектор |
+| GET / DELETE | `/findings` | найти / очистить находки |
+| GET / POST | `/profile` | экспорт / dry-run или импорт профиля |
+| GET / POST / DELETE | `/scan` | состояние / запуск / остановка скана |
+| GET | `/interfaces` | сетевые интерфейсы и подсети |
 
-## Создание проброса
+Полная машиночитаемая схема: [OpenAPI 3.1](openapi.yaml).
+
+## Создать TCP-проброс
 
 ```sh
-curl http://127.0.0.1:8420/api/rules \
+curl http://127.0.0.1:8420/api/v1/rules \
   -H 'X-Auth-Token: TOKEN' -H 'Content-Type: application/json' \
-  -d '{"name":"service","enabled":true,"listen_port":7010,
-       "target":{"host":"192.168.0.5","port":7010},
-       "dump":{"enabled":true}}'
+  -d '{
+    "name":"service",
+    "enabled":true,
+    "protocol":"tcp",
+    "listen_port":7010,
+    "target":{"host":"192.168.0.5","port":7010},
+    "inspect":{"enabled":true,"auto_pin":true},
+    "dump":{"enabled":true}
+  }'
 ```
 
 ## Поиск трафика
 
-`GET /api/rules/{id}/dumps?summary=1` возвращает `{ "items": [...], "total": N }`.
-Параметры передаются с URL-кодированием:
+`GET /rules/{id}/dumps?summary=1` возвращает `{ "items": [...], "total": N }`.
 
 | Параметр | Значения |
 |---|---|
-| `q` | Строка поиска |
+| `q` | строка поиска |
 | `mode` | `text`, `hex`, `regex` |
-| `dir` | `any`, `in` (к сервису), `out` (от сервиса) |
-| `remote` | Подстрока адреса клиента |
-| `from`, `to` | Время начала соединения в RFC 3339 |
+| `dir` | `any`, `in`, `out` |
+| `remote` | подстрока адреса клиента |
+| `from`, `to` | RFC 3339 |
 | `pinned` | `1` — только закреплённые |
-| `offset`, `limit` | Смещение и размер страницы |
+| `offset`, `limit` | страница, максимум 500 записей |
 
-Поиск проверяет сохранённый поток каждого направления целиком. Два направления
-не склеиваются; отсутствующие из-за лимита байты не участвуют в поиске.
-Без `summary=1` эндпоинт возвращает полный список записей для совместимости.
+Поиск идёт по сохранённому потоку каждого направления отдельно.
 
-В `/api/state` массив `events` идёт от новых событий к старым, `metrics` —
-по времени. Метрики: `bytes_in_per_sec`, `bytes_out_per_sec`,
-`connections_per_sec`, `failed_per_sec`, `active_conns`.
+## Находки
+
+```sh
+curl 'http://127.0.0.1:8420/api/v1/findings?min_score=60&limit=100' \
+  -H 'X-Auth-Token: TOKEN'
+```
+
+Фильтры: `q`, `rule_id`, `min_score`, `limit` (до 1000). Ответ содержит `items`, `total` и число событий, отброшенных при заполненной очереди.
+
+## Импорт профиля
+
+Сначала отправь тот же запрос с `dry_run: true`, затем примени с `false`:
+
+```json
+{
+  "profile": { "schema_version": 1, "scan": {}, "detection": {}, "rules": [] },
+  "mode": "merge",
+  "dry_run": true
+}
+```
+
+`merge` добавляет и обновляет правила по ID. `replace` удаляет правила, которых нет в профиле.

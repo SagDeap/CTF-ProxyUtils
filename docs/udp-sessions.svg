@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="350" viewBox="0 0 1040 350" role="img" aria-labelledby="title desc">
+  <title id="title">UDP-клиенты и upstream-сессии</title>
+  <desc id="desc">Каждый адрес UDP-клиента связан с отдельным подключённым upstream-сокетом до истечения idle TTL.</desc>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#66b5ff"/></marker></defs>
+  <rect width="1040" height="350" rx="18" fill="#0d1117"/>
+  <g font-family="Segoe UI,Arial,sans-serif">
+    <text x="32" y="40" fill="#8b9bad" font-size="13" letter-spacing="2">UDP SESSION MAP</text>
+    <g fill="#151b23" stroke="#32404f"><rect x="32" y="78" width="230" height="76" rx="12"/><rect x="32" y="198" width="230" height="76" rx="12"/></g>
+    <g fill="#eaf2f7" font-size="17" font-weight="600"><text x="54" y="111">Клиент A</text><text x="54" y="231">Клиент B</text></g>
+    <g fill="#8fa0b2" font-size="14"><text x="54" y="136">10.0.0.4:51001</text><text x="54" y="256">10.0.0.9:62044</text></g>
+    <path d="M262 116H366" stroke="#66b5ff" stroke-width="3" marker-end="url(#a)"/><path d="M262 236H366" stroke="#66b5ff" stroke-width="3" marker-end="url(#a)"/>
+    <rect x="378" y="68" width="300" height="216" rx="14" fill="#102139" stroke="#66b5ff"/>
+    <text x="404" y="106" fill="#eaf2f7" font-size="20" font-weight="600">CTF-ProxyUtils :31337/udp</text>
+    <rect x="404" y="132" width="248" height="48" rx="8" fill="#172d48"/><rect x="404" y="198" width="248" height="48" rx="8" fill="#172d48"/>
+    <text x="421" y="161" fill="#bddcff" font-size="14">A → socket #41 · TTL 30s</text><text x="421" y="227" fill="#bddcff" font-size="14">B → socket #42 · TTL 30s</text>
+    <path d="M678 116H782" stroke="#66b5ff" stroke-width="3" marker-end="url(#a)"/><path d="M678 236H782" stroke="#66b5ff" stroke-width="3" marker-end="url(#a)"/>
+    <rect x="794" y="116" width="214" height="120" rx="14" fill="#151b23" stroke="#5ad69d"/>
+    <text x="818" y="158" fill="#eaf2f7" font-size="19" font-weight="600">Сервис</text><text x="818" y="190" fill="#8fa0b2" font-size="15">connected UDP</text><text x="818" y="215" fill="#8fa0b2" font-size="15">посторонние ответы ✕</text>
+    <text x="378" y="319" fill="#8fa0b2" font-size="14">Границы датаграмм сохраняются в записи трафика</text>
+  </g>
+</svg>

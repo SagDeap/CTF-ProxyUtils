@@ -39,6 +39,9 @@ type ConnDump struct {
 	Chunks     []Chunk   `json:"chunks,omitempty"`
 	Truncated  bool      `json:"truncated"`
 	Pinned     bool      `json:"pinned"`
+	RiskScore  int       `json:"risk_score,omitempty"`
+	Findings   int       `json:"findings,omitempty"`
+	Protocol   string    `json:"protocol,omitempty"`
 }
 
 // DumpQuery searches captured stream prefixes independently in each direction.
@@ -177,6 +180,10 @@ func (r *Recorder) remove(i int) {
 // Begin skips capturing new connections when every available slot is pinned.
 // A nil writer is safe to use through Write and Finish.
 func (r *Recorder) Begin(id uint64, remote, target string) *connWriter {
+	return r.BeginProtocol(id, remote, target, "tcp")
+}
+
+func (r *Recorder) BeginProtocol(id uint64, remote, target, protocol string) *connWriter {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, d := range r.dumps {
@@ -193,11 +200,30 @@ func (r *Recorder) Begin(id uint64, remote, target string) *connWriter {
 	}
 	r.sequence++
 	d := &recordedConn{ConnDump: ConnDump{
-		ID: id, RemoteAddr: remote, Target: target, StartedAt: time.Now(),
+		ID: id, RemoteAddr: remote, Target: target, Protocol: protocol, StartedAt: time.Now(),
 	}, token: r.sequence}
 	r.dumps = append(r.dumps, d)
 	r.active[d.token] = d
 	return &connWriter{rec: r, token: d.token}
+}
+
+func (r *Recorder) MarkFinding(id uint64, score int, pin bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, d := range r.dumps {
+		if d.ID != id {
+			continue
+		}
+		d.Findings++
+		if score > d.RiskScore {
+			d.RiskScore = score
+		}
+		if pin {
+			d.Pinned = true
+		}
+		return nil
+	}
+	return ErrDumpNotFound
 }
 
 // Count reads only metadata; polling the panel never copies captured traffic.
@@ -359,12 +385,28 @@ func (r *Recorder) ClearAll() {
 }
 
 type connWriter struct {
-	rec   *Recorder
-	token uint64
+	rec      *Recorder
+	token    uint64
+	observe  func(string, []byte)
+	onFinish func()
 }
 
 func (w *connWriter) Write(dir string, b []byte) {
+	w.write(dir, b, false)
+}
+
+func (w *connWriter) WriteDatagram(dir string, b []byte) {
+	w.write(dir, b, true)
+}
+
+func (w *connWriter) write(dir string, b []byte, datagram bool) {
 	if w == nil || len(b) == 0 || (dir != DirIn && dir != DirOut) {
+		return
+	}
+	if w.observe != nil {
+		w.observe(dir, b)
+	}
+	if w.rec == nil {
 		return
 	}
 	w.rec.mu.Lock()
@@ -390,7 +432,7 @@ func (w *connWriter) Write(dir string, b []byte) {
 		return
 	}
 	last := len(d.Chunks) - 1
-	if last >= 0 && d.Chunks[last].Dir == dir {
+	if !datagram && last >= 0 && d.Chunks[last].Dir == dir {
 		d.Chunks[last].Data = append(d.Chunks[last].Data, b...)
 	} else {
 		if len(d.Chunks) >= maxDumpChunks {
@@ -404,6 +446,13 @@ func (w *connWriter) Write(dir string, b []byte) {
 
 func (w *connWriter) Finish(bytesIn, bytesOut int64) {
 	if w == nil {
+		return
+	}
+	if w.onFinish != nil {
+		w.onFinish()
+		w.onFinish = nil
+	}
+	if w.rec == nil {
 		return
 	}
 	w.rec.mu.Lock()

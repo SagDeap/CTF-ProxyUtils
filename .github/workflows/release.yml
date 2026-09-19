@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Существующий тег, например v0.2.0'
+        description: 'Существующий тег, например v1.0.0'
         required: true
 
 permissions:
@@ -35,7 +35,7 @@ jobs:
           go vet ./...
           go test -race ./...
           GOARCH=386 CGO_ENABLED=0 go test ./...
-          node --test internal/web/static/_traffic-utils.test.js
+          node --test internal/web/static/*.test.js
       - name: Собрать бинарники
         run: |
           make dist VERSION="$RELEASE_TAG"

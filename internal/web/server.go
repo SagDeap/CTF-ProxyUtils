@@ -47,8 +47,7 @@ func NewServer(cfg *config.Config, mgr *proxy.Manager, sc *scan.Scanner, version
 func (s *Server) Close() { s.metrics.close() }
 
 func (s *Server) routes() {
-	// Проверка живости — единственное, что доступно без токена.
-	s.mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) {
+	ping := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeErr(w, http.StatusMethodNotAllowed, "только GET")
 			return
@@ -58,15 +57,22 @@ func (s *Server) routes() {
 			"version":  s.version,
 			"auth":     s.cfg.Web.Token != "",
 			"uptime_s": int(time.Since(s.started).Seconds()),
+			"api":      "v1",
 		})
-	})
-	s.mux.HandleFunc("/api/login", s.handleLogin)
-
-	s.mux.HandleFunc("/api/state", s.auth(s.handleState))
-	s.mux.HandleFunc("/api/interfaces", s.auth(s.handleInterfaces))
-	s.mux.HandleFunc("/api/rules", s.auth(s.handleRules))
-	s.mux.HandleFunc("/api/rules/", s.auth(s.handleRuleItem))
-	s.mux.HandleFunc("/api/scan", s.auth(s.handleScan))
+	}
+	for _, prefix := range []string{"/api", "/api/v1"} {
+		s.mux.HandleFunc(prefix+"/ping", ping)
+		s.mux.HandleFunc(prefix+"/login", s.handleLogin)
+		s.mux.HandleFunc(prefix+"/state", s.auth(s.handleState))
+		s.mux.HandleFunc(prefix+"/interfaces", s.auth(s.handleInterfaces))
+		s.mux.HandleFunc(prefix+"/rules", s.auth(s.handleRules))
+		s.mux.HandleFunc(prefix+"/rules/", s.auth(s.handleRuleItem))
+		s.mux.HandleFunc(prefix+"/scan", s.auth(s.handleScan))
+	}
+	s.mux.HandleFunc("/api/v1/detectors", s.auth(s.handleDetectors))
+	s.mux.HandleFunc("/api/v1/detectors/", s.auth(s.handleDetectorItem))
+	s.mux.HandleFunc("/api/v1/findings", s.auth(s.handleFindings))
+	s.mux.HandleFunc("/api/v1/profile", s.auth(s.handleProfile))
 
 	s.mux.HandleFunc("/", s.handleStatic)
 }

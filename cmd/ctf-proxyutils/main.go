@@ -20,7 +20,7 @@ import (
 	"github.com/SagDeap/CTF-ProxyUtils/internal/web"
 )
 
-var version = "0.2.0"
+var version = "1.0.0"
 
 func main() {
 	var (
@@ -73,6 +73,10 @@ func main() {
 	}
 
 	mgr := proxy.NewManager()
+	defer mgr.Close()
+	if err := mgr.SetDetectionConfig(cfg.DetectionSnapshot()); err != nil {
+		log.Fatalf("детекторы: %v", err)
+	}
 	scanner := scan.NewScanner()
 
 	// Любое изменение правил сразу уходит на диск: если утилиту прибьют,

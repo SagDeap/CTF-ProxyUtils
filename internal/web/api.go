@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -55,10 +56,15 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	host, _ := os.Hostname()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"rules":   s.mgr.Snapshots(),
-		"scan":    s.scanner.State(),
-		"events":  s.mgr.Events(),
-		"metrics": s.metrics.snapshot(),
+		"rules":    s.mgr.Snapshots(),
+		"scan":     s.scanner.State(),
+		"events":   s.mgr.Events(),
+		"metrics":  s.metrics.snapshot(),
+		"findings": s.mgr.Findings(),
+		"detection": map[string]interface{}{
+			"config":  s.mgr.DetectionConfig(),
+			"dropped": s.mgr.DetectionDropped(),
+		},
 		"system": map[string]interface{}{
 			"hostname":   host,
 			"version":    s.version,
@@ -117,7 +123,10 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 // handleRuleItem разбирает /api/rules/{id}[/{action}] вручную:
 // ServeMux из Go 1.18 шаблонов в путях не понимает.
 func (s *Server) handleRuleItem(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/api/rules/")
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/rules/")
+	if rest == r.URL.Path {
+		rest = strings.TrimPrefix(r.URL.Path, "/api/rules/")
+	}
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		writeErr(w, http.StatusBadRequest, "не указан идентификатор правила")
@@ -369,5 +378,251 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.scanner.State())
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "метод не поддерживается")
+	}
+}
+
+func (s *Server) applyDetectionConfig(config proxy.DetectionConfig) error {
+	config.ApplyDefaults()
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	previous := s.mgr.DetectionConfig()
+	if err := s.mgr.SetDetectionConfig(config); err != nil {
+		return err
+	}
+	if err := s.cfg.SetDetection(config); err != nil {
+		_ = s.mgr.SetDetectionConfig(previous)
+		return err
+	}
+	return nil
+}
+
+func (s *Server) handleDetectors(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.mgr.DetectionConfig())
+	case http.MethodPut:
+		var config proxy.DetectionConfig
+		if !decode(w, r, &config) {
+			return
+		}
+		if err := s.applyDetectionConfig(config); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, s.mgr.DetectionConfig())
+	case http.MethodPost:
+		var detector proxy.DetectorSpec
+		if !decode(w, r, &detector) {
+			return
+		}
+		if detector.ID == "" {
+			detector.ID = proxy.NewDetectorID()
+		}
+		config := s.mgr.DetectionConfig()
+		config.Detectors = append(config.Detectors, detector)
+		if err := s.applyDetectionConfig(config); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, detector)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "метод не поддерживается")
+	}
+}
+
+func (s *Server) handleDetectorItem(w http.ResponseWriter, r *http.Request) {
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/detectors/"), "/")
+	if id == "" || strings.Contains(id, "/") {
+		writeErr(w, http.StatusNotFound, "детектор не найден")
+		return
+	}
+	config := s.mgr.DetectionConfig()
+	index := -1
+	for i, detector := range config.Detectors {
+		if detector.ID == id {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		writeErr(w, http.StatusNotFound, "детектор не найден")
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var detector proxy.DetectorSpec
+		if !decode(w, r, &detector) {
+			return
+		}
+		detector.ID = id
+		config.Detectors[index] = detector
+	case http.MethodDelete:
+		config.Detectors = append(config.Detectors[:index], config.Detectors[index+1:]...)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "только PUT или DELETE")
+		return
+	}
+	if err := s.applyDetectionConfig(config); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.mgr.DetectionConfig())
+}
+
+func (s *Server) handleFindings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		s.mgr.ClearFindings()
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "только GET или DELETE")
+		return
+	}
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	ruleID := r.URL.Query().Get("rule_id")
+	minimum, _ := strconv.Atoi(r.URL.Query().Get("min_score"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	items := make([]*proxy.Finding, 0)
+	for _, finding := range s.mgr.Findings() {
+		if ruleID != "" && finding.RuleID != ruleID || finding.Score < minimum {
+			continue
+		}
+		if query != "" {
+			haystack := strings.ToLower(fmt.Sprintf("%s %s %s %s", finding.RuleName, finding.RemoteAddr, finding.Target, finding.Severity))
+			for _, signal := range finding.Signals {
+				haystack += " " + strings.ToLower(signal.DetectorName+" "+signal.Reason+" "+signal.Excerpt)
+			}
+			if !strings.Contains(haystack, query) {
+				continue
+			}
+		}
+		items = append(items, finding)
+		if len(items) == limit {
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items, "total": len(items), "dropped": s.mgr.DetectionDropped()})
+}
+
+type profileImportRequest struct {
+	Profile config.Profile `json:"profile"`
+	Mode    string         `json:"mode"`
+	DryRun  bool           `json:"dry_run"`
+}
+
+type profilePreview struct {
+	Added   int              `json:"added"`
+	Updated int              `json:"updated"`
+	Removed int              `json:"removed"`
+	Rules   []proxy.RuleSpec `json:"rules"`
+}
+
+func mergeProfileRules(current, imported []proxy.RuleSpec, mode string) ([]proxy.RuleSpec, profilePreview, error) {
+	if mode == "" {
+		mode = "merge"
+	}
+	if mode != "merge" && mode != "replace" {
+		return nil, profilePreview{}, fmt.Errorf("режим импорта должен быть merge или replace")
+	}
+	preview := profilePreview{}
+	currentIDs := make(map[string]bool)
+	for _, rule := range current {
+		currentIDs[rule.ID] = true
+	}
+	var combined []proxy.RuleSpec
+	if mode == "replace" {
+		combined = append([]proxy.RuleSpec(nil), imported...)
+		importedIDs := make(map[string]bool)
+		for _, rule := range imported {
+			if rule.ID != "" {
+				importedIDs[rule.ID] = true
+			}
+			if currentIDs[rule.ID] && rule.ID != "" {
+				preview.Updated++
+			} else {
+				preview.Added++
+			}
+		}
+		for id := range currentIDs {
+			if !importedIDs[id] {
+				preview.Removed++
+			}
+		}
+	} else {
+		combined = append([]proxy.RuleSpec(nil), current...)
+		positions := make(map[string]int)
+		for i, rule := range combined {
+			positions[rule.ID] = i
+		}
+		for _, rule := range imported {
+			if index, exists := positions[rule.ID]; exists && rule.ID != "" {
+				combined[index] = rule
+				preview.Updated++
+			} else {
+				combined = append(combined, rule)
+				preview.Added++
+			}
+		}
+	}
+	normalized, err := proxy.NormalizeRuleSet(combined)
+	if err != nil {
+		return nil, preview, err
+	}
+	preview.Rules = normalized
+	return normalized, preview, nil
+}
+
+func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		host, _ := os.Hostname()
+		profile := s.cfg.ProfileSnapshot(host)
+		profile.Rules = s.mgr.Specs()
+		profile.Detection = s.mgr.DetectionConfig()
+		profile.ExportedAt = time.Now().UTC().Format(time.RFC3339)
+		writeJSON(w, http.StatusOK, profile)
+	case http.MethodPost:
+		var request profileImportRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		if request.Profile.SchemaVersion > 1 {
+			writeErr(w, http.StatusBadRequest, "профиль создан более новой версией программы")
+			return
+		}
+		request.Profile.Detection.ApplyDefaults()
+		if err := request.Profile.Detection.Validate(); err != nil {
+			writeErr(w, http.StatusBadRequest, "детекторы: "+err.Error())
+			return
+		}
+		rules, preview, err := mergeProfileRules(s.mgr.Specs(), request.Profile.Rules, request.Mode)
+		if err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		if request.DryRun {
+			writeJSON(w, http.StatusOK, preview)
+			return
+		}
+		if err := s.mgr.ReplaceSpecs(rules); err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		if err := s.applyDetectionConfig(request.Profile.Detection); err != nil {
+			writeErr(w, http.StatusInternalServerError, "правила применены, но детекторы не сохранены: "+err.Error())
+			return
+		}
+		if err := s.cfg.SetScan(request.Profile.Scan); err != nil {
+			writeErr(w, http.StatusInternalServerError, "профиль применён, но параметры сканера не сохранены: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, preview)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "только GET или POST")
 	}
 }

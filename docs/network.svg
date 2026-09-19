@@ -10,12 +10,12 @@
     <text x="32" y="38" fill="#97a6b7" font-size="13" letter-spacing="2">ТРАФИК СЕРВИСА</text>
     <rect x="32" y="86" width="216" height="108" rx="12" fill="#161b22" stroke="#303b49"/>
     <text x="56" y="124" fill="#e6edf3" font-size="20" font-weight="600">Чекер / атакующие</text>
-    <text x="56" y="157" fill="#97a6b7" font-size="15">TCP → vulnbox:7010</text>
+    <text x="56" y="157" fill="#97a6b7" font-size="15">TCP / UDP → vulnbox</text>
     <path d="M248 140H356" fill="none" stroke="#47d997" stroke-width="3" marker-end="url(#arrow)"/>
     <rect x="368" y="70" width="310" height="140" rx="12" fill="#10281f" stroke="#47d997"/>
     <text x="392" y="105" fill="#97a6b7" font-size="14">VULNBOX</text>
     <text x="392" y="137" fill="#e6edf3" font-size="22" font-weight="600">CTF-ProxyUtils :7010</text>
-    <text x="392" y="178" fill="#9ce8c4" font-size="15">Запись · поиск · события · графики</text>
+    <text x="392" y="178" fill="#9ce8c4" font-size="15">Проброс · риск · health · запись</text>
     <path d="M678 114H752V99H820" fill="none" stroke="#47d997" stroke-width="3" marker-end="url(#arrow)"/>
     <path d="M678 166H752V201H820" fill="none" stroke="#47d997" stroke-width="2" stroke-dasharray="6 6" marker-end="url(#arrow)"/>
     <rect x="832" y="55" width="256" height="86" rx="12" fill="#161b22" stroke="#303b49"/>

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="360" viewBox="0 0 1040 360" role="img" aria-labelledby="title desc">
+  <title id="title">Health-check и переключение резерва</title>
+  <desc id="desc">Проверки основного и резервного адресов меняют состояние после порогов ошибок и успехов. Роутер выбирает адрес для новых соединений.</desc>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#63d6a3"/></marker></defs>
+  <rect width="1040" height="360" rx="18" fill="#0d1117"/>
+  <g font-family="Segoe UI,Arial,sans-serif">
+    <text x="32" y="40" fill="#8b9bad" font-size="13" letter-spacing="2">HEALTH → ROUTE</text>
+    <rect x="32" y="82" width="250" height="206" rx="14" fill="#151b23" stroke="#32404f"/>
+    <text x="56" y="118" fill="#eef5f8" font-size="19" font-weight="600">Проверки</text>
+    <g fill="#9daebe" font-size="15"><text x="56" y="154">TCP connect</text><text x="56" y="182">Payload → match</text><text x="56" y="210">HTTP → status + body</text></g>
+    <rect x="55" y="236" width="202" height="30" rx="7" fill="#212a35"/><text x="72" y="257" fill="#c7d2dc" font-size="13">interval · timeout · streak</text>
+    <path d="M282 185H360" stroke="#63d6a3" stroke-width="3" marker-end="url(#a)"/>
+    <rect x="372" y="104" width="246" height="162" rx="14" fill="#102a22" stroke="#63d6a3"/>
+    <text x="396" y="140" fill="#eef5f8" font-size="19" font-weight="600">Решение маршрута</text>
+    <g fill="#a9e6cc" font-size="15"><text x="396" y="178">auto · primary · backup</text><text x="396" y="207">только новые TCP</text><text x="396" y="234">UDP меняет сессию</text></g>
+    <path d="M618 154H700" stroke="#63d6a3" stroke-width="3" marker-end="url(#a)"/><path d="M618 216H700" stroke="#f1ad5a" stroke-width="2" stroke-dasharray="7 6" marker-end="url(#a)"/>
+    <rect x="712" y="73" width="294" height="112" rx="14" fill="#151b23" stroke="#63d6a3"/>
+    <text x="738" y="111" fill="#eef5f8" font-size="19" font-weight="600">Основной</text><text x="738" y="143" fill="#9daebe" font-size="15">fail_after ↓ · rise_after ↑</text>
+    <rect x="712" y="205" width="294" height="112" rx="14" fill="#151b23" stroke="#f1ad5a"/>
+    <text x="738" y="243" fill="#eef5f8" font-size="19" font-weight="600">Резерв</text><text x="738" y="275" fill="#9daebe" font-size="15">auto_failover / auto_failback</text>
+  </g>
+</svg>

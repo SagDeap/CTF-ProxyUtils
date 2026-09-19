@@ -1,9 +1,16 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -49,12 +56,21 @@ func (r *Rule) stopHealthLocked() {
 func (r *Rule) probeOnce(ctx context.Context, spec RuleSpec) {
 	probe := func(primary bool, endpoint Endpoint) {
 		probeCtx, cancel := context.WithTimeout(ctx, time.Duration(spec.Health.TimeoutMS)*time.Millisecond)
-		conn, err := (&net.Dialer{}).DialContext(probeCtx, "tcp", endpoint.Addr())
+		started := time.Now()
+		err := runHealthProbe(probeCtx, spec, endpoint)
 		cancel()
-		if conn != nil {
-			conn.Close()
-		}
 		if ctx.Err() == nil {
+			result := HealthResult{At: time.Now(), OK: err == nil, LatencyMS: time.Since(started).Milliseconds()}
+			if err != nil {
+				result.Error = err.Error()
+			}
+			r.mu.Lock()
+			if primary {
+				r.targetHealth = result
+			} else {
+				r.backupHealth = result
+			}
+			r.mu.Unlock()
 			r.noteEndpointProbe(primary, endpoint, err == nil)
 		}
 	}
@@ -69,6 +85,129 @@ func (r *Rule) probeOnce(ctx context.Context, spec RuleSpec) {
 		r.mu.Lock()
 		r.lastCheck = time.Now()
 		r.mu.Unlock()
+	}
+}
+
+func runHealthProbe(ctx context.Context, spec RuleSpec, endpoint Endpoint) error {
+	mode := spec.Health.Mode
+	if mode == "" {
+		mode = "tcp"
+	}
+	if mode == "http" {
+		if spec.Protocol == "udp" {
+			return errors.New("HTTP health-check недоступен для UDP")
+		}
+		return runHTTPHealthProbe(ctx, spec.Health, endpoint)
+	}
+	network := spec.Protocol
+	if network == "" {
+		network = "tcp"
+	}
+	conn, err := (&net.Dialer{}).DialContext(ctx, network, endpoint.Addr())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
+	}
+	if mode == "tcp" {
+		return nil
+	}
+	request, err := decodeHealthBytes(spec.Health.RequestMode, spec.Health.Request)
+	if err != nil {
+		return fmt.Errorf("запрос: %w", err)
+	}
+	if len(request) > 0 {
+		if _, err := conn.Write(request); err != nil {
+			return err
+		}
+	}
+	if spec.Health.Expect == "" {
+		return nil
+	}
+	return readHealthResponse(conn, spec.Health.ExpectMode, spec.Health.Expect)
+}
+
+func readHealthResponse(reader io.Reader, mode, pattern string) error {
+	response := make([]byte, 0, 4096)
+	buffer := make([]byte, 4096)
+	for len(response) < 64*1024 {
+		n, err := reader.Read(buffer)
+		if n > 0 {
+			response = append(response, buffer[:n]...)
+			if matchHealthResponse(mode, pattern, response) {
+				return nil
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+	}
+	return errors.New("ответ не совпал с ожидаемым шаблоном")
+}
+
+func runHTTPHealthProbe(ctx context.Context, health HealthSpec, endpoint Endpoint) error {
+	method := health.HTTPMethod
+	if method == "" {
+		method = http.MethodGet
+	}
+	path := health.HTTPPath
+	if path == "" {
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	request, err := http.NewRequestWithContext(ctx, method, "http://"+endpoint.Addr()+path, strings.NewReader(health.Request))
+	if err != nil {
+		return err
+	}
+	if health.HTTPHost != "" {
+		request.Host = health.HTTPHost
+	}
+	for key, value := range health.HTTPHeaders {
+		request.Header.Set(key, value)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}, Timeout: time.Duration(health.TimeoutMS) * time.Millisecond}
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if health.HTTPStatus > 0 && response.StatusCode != health.HTTPStatus {
+		return fmt.Errorf("HTTP %d вместо %d", response.StatusCode, health.HTTPStatus)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	if err != nil {
+		return err
+	}
+	if health.Expect != "" && !matchHealthResponse(health.ExpectMode, health.Expect, body) {
+		return errors.New("HTTP-тело не совпало с ожидаемым шаблоном")
+	}
+	return nil
+}
+
+func decodeHealthBytes(mode, value string) ([]byte, error) {
+	if mode == "hex" {
+		return hex.DecodeString(strings.Join(strings.Fields(value), ""))
+	}
+	return []byte(value), nil
+}
+
+func matchHealthResponse(mode, pattern string, response []byte) bool {
+	switch mode {
+	case "hex":
+		value, err := hex.DecodeString(strings.Join(strings.Fields(pattern), ""))
+		return err == nil && bytes.Contains(response, value)
+	case "regex":
+		re, err := regexp.Compile(pattern)
+		return err == nil && re.Match(response)
+	default:
+		return bytes.Contains(response, []byte(pattern))
 	}
 }
 

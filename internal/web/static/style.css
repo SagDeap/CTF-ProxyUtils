@@ -214,7 +214,7 @@ main { width: min(1500px, 100%); margin: 0 auto; padding: clamp(24px, 3.5vw, 52p
 .btn-danger:hover { border-color: rgba(255,107,117,.55); color: var(--danger); background: rgba(255,107,117,.07); }
 .btn-sm { min-height: 29px; padding: 4px 9px; font-size: 11px; }
 
-input[type=text], input[type=number], input[type=password], input[type=datetime-local], .select {
+input[type=text], input[type=number], input[type=password], input[type=datetime-local], textarea, .select {
   width: 100%;
   min-height: 38px;
   padding: 8px 11px;
@@ -227,9 +227,10 @@ input[type=text], input[type=number], input[type=password], input[type=datetime-
   transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
 }
 
-input::placeholder { color: #596679; opacity: 1; }
-input:hover, .select:hover { border-color: var(--border-strong); }
-input:focus, .select:focus { outline: none; border-color: rgba(86,227,154,.62); background: rgba(5,10,17,.84); box-shadow: 0 0 0 3px rgba(86,227,154,.08), inset 0 1px 5px rgba(0,0,0,.15); }
+textarea { resize: vertical; min-height: 74px; }
+input::placeholder, textarea::placeholder { color: #596679; opacity: 1; }
+input:hover, textarea:hover, .select:hover { border-color: var(--border-strong); }
+input:focus, textarea:focus, .select:focus { outline: none; border-color: rgba(86,227,154,.62); background: rgba(5,10,17,.84); box-shadow: 0 0 0 3px rgba(86,227,154,.08), inset 0 1px 5px rgba(0,0,0,.15); }
 .select { font-family: inherit; }
 input[type=datetime-local] { color-scheme: dark; }
 .field { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -325,6 +326,29 @@ input[type=datetime-local] { color-scheme: dark; }
 .hexdump .asc { color: var(--accent); }
 .view-toggle { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 11px; }
 .export-button { margin-left: auto; }
+
+/* Findings */
+.findings { display: flex; flex-direction: column; gap: 10px; margin-bottom: 24px; }
+.finding { display: grid; grid-template-columns: 74px minmax(0, 1fr) auto; align-items: start; gap: 16px; padding: 16px; border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: var(--radius); background: linear-gradient(145deg, rgba(20,29,43,.9), rgba(12,18,28,.9)); box-shadow: 0 12px 35px rgba(0,0,0,.1); }
+.finding.severity-high, .finding.severity-critical { border-left-color: var(--danger); }
+.finding-score { display: flex; align-items: baseline; color: var(--warn); font-family: var(--mono); }
+.severity-high .finding-score, .severity-critical .finding-score { color: var(--danger); }
+.finding-score strong { font-size: 26px; line-height: 1; }
+.finding-score span { color: var(--dim); font-size: 10px; }
+.finding-head { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.finding-meta { margin-top: 5px; color: var(--dim); font: 10px var(--mono); }
+.finding-signals { display: grid; gap: 7px; margin-top: 11px; }
+.finding-signals > div { display: flex; align-items: flex-start; gap: 10px; font-size: 11px; }
+.finding-signals code { max-width: 100%; overflow-wrap: anywhere; color: var(--dim); white-space: pre-wrap; }
+.detector-settings { margin-top: 24px; background: rgba(12,18,28,.7); }
+.detector-global, .detector-form { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 11px; }
+.detector-global { padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.detector-form { padding: 14px 0; }
+.detector-form > .field { min-width: 130px; }
+.detector-form > .compact { flex: 0 1 145px; }
+.detectors-list { display: grid; gap: 8px; }
+.detector-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 11px; border: 1px solid var(--border); border-radius: 9px; background: rgba(3,7,13,.3); }
+.detector-row code { flex: 1; min-width: 180px; overflow-wrap: anywhere; color: var(--dim); font-size: 10px; }
 
 /* Monitoring */
 .monitor-intro > span { align-self: flex-end; padding-bottom: 5px; font: 11px var(--mono); }
@@ -445,6 +469,9 @@ button:focus-visible, select:focus-visible, summary:focus-visible, input:focus-v
   .modal { padding: 12px; }
   #rule-form { padding: 16px; }
   .login-box { padding: 31px 23px; }
+  .finding { grid-template-columns: 58px 1fr; gap: 10px; }
+  .finding > .btn { grid-column: 1 / -1; }
+  .detector-global > *, .detector-form > * { flex: 1 1 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

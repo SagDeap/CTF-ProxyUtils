@@ -19,9 +19,38 @@ type Manager struct {
 	order    []string
 	onChange func()
 	journal  eventJournal
+	detector *DetectorEngine
 }
 
-func NewManager() *Manager { return &Manager{rules: make(map[string]*Rule)} }
+func NewManager() *Manager {
+	detector, _ := NewDetectorEngine(DefaultDetectionConfig())
+	m := &Manager{rules: make(map[string]*Rule), detector: detector}
+	detector.SetHook(func(finding Finding, created, autoPin bool) {
+		if rule, ok := m.Get(finding.RuleID); ok {
+			_ = rule.rec.MarkFinding(finding.ConnectionID, finding.Score, autoPin)
+		}
+		if created {
+			m.journal.add(finding.RuleID, finding.RuleName, "traffic_finding", fmt.Sprintf("Подозрительный трафик: %d/100 (%s)", finding.Score, finding.Severity))
+		}
+	})
+	return m
+}
+
+func NewDetectorID() string { return "d-" + newID() }
+
+func (m *Manager) SetDetectionConfig(config DetectionConfig) error {
+	if err := m.detector.Configure(config); err != nil {
+		return err
+	}
+	m.notify()
+	return nil
+}
+
+func (m *Manager) DetectionConfig() DetectionConfig { return m.detector.Config() }
+func (m *Manager) Findings() []*Finding             { return m.detector.Findings() }
+func (m *Manager) ClearFindings()                   { m.detector.ClearFindings() }
+func (m *Manager) DetectionDropped() uint64         { return m.detector.Dropped() }
+func (m *Manager) Close()                           { m.detector.Close() }
 
 func (m *Manager) SetOnChange(fn func()) {
 	m.mu.Lock()
@@ -53,6 +82,9 @@ func (m *Manager) checkPortConflictLocked(spec RuleSpec, excludeID string) error
 		}
 		other := rule.Spec()
 		if other.ListenPort != spec.ListenPort {
+			continue
+		}
+		if other.Protocol != spec.Protocol {
 			continue
 		}
 		left, right := net.ParseIP(other.ListenHost), net.ParseIP(spec.ListenHost)
@@ -101,6 +133,7 @@ func (m *Manager) addLocked(spec RuleSpec) (*Rule, error) {
 		return nil, err
 	}
 	rule.event = m.journal.add
+	rule.detector = m.detector
 	m.rules[spec.ID] = rule
 	m.order = append(m.order, spec.ID)
 	m.mu.Unlock()
@@ -149,9 +182,9 @@ func (m *Manager) updateLocked(id string, spec RuleSpec) error {
 	defer rule.lifeMu.Unlock()
 	old := rule.Spec()
 	wasRunning := rule.Snapshot().Running
-	needListener := spec.Enabled && (!wasRunning || old.ListenAddr() != spec.ListenAddr())
+	needListener := spec.Enabled && (!wasRunning || old.ListenAddr() != spec.ListenAddr() || old.Protocol != spec.Protocol)
 	stoppedOld := false
-	var candidate net.Listener
+	var candidate *boundSocket
 	// Bind before changing configuration or trimming captures. When old and new
 	// bindings overlap on the same port, retry after Stop and restore on failure.
 	restore := func(cause error) error {
@@ -170,11 +203,11 @@ func (m *Manager) updateLocked(id string, spec RuleSpec) error {
 		return cause
 	}
 	if needListener {
-		candidate, err = net.Listen("tcp", spec.ListenAddr())
-		if err != nil && wasRunning && old.ListenPort == spec.ListenPort {
+		candidate, err = bindRuleSocket(spec)
+		if err != nil && wasRunning && old.ListenPort == spec.ListenPort && old.Protocol == spec.Protocol {
 			rule.stopLocked()
 			stoppedOld = true
-			candidate, err = net.Listen("tcp", spec.ListenAddr())
+			candidate, err = bindRuleSocket(spec)
 		}
 		if err != nil {
 			return restore(fmt.Errorf("не удалось занять %s: %w", spec.ListenAddr(), err))
@@ -325,6 +358,75 @@ func (m *Manager) LoadSpecs(specs []RuleSpec) []error {
 		}
 	}
 	return errs
+}
+
+// NormalizeRuleSet validates a complete profile before any live listener is
+// stopped. Missing IDs are assigned once and returned to the caller.
+func NormalizeRuleSet(specs []RuleSpec) ([]RuleSpec, error) {
+	normalized := make([]RuleSpec, len(specs))
+	ids := make(map[string]bool)
+	for i, spec := range specs {
+		spec = spec.Clone()
+		if spec.ID == "" {
+			spec.ID = newID()
+		}
+		spec.applyDefaults()
+		if ids[spec.ID] {
+			return nil, fmt.Errorf("повторяющийся ID правила %q", spec.ID)
+		}
+		ids[spec.ID] = true
+		if err := spec.Validate(); err != nil {
+			return nil, fmt.Errorf("правило %q: %w", spec.Name, err)
+		}
+		for _, other := range normalized[:i] {
+			if other.ListenPort != spec.ListenPort || other.Protocol != spec.Protocol {
+				continue
+			}
+			left, right := net.ParseIP(other.ListenHost), net.ParseIP(spec.ListenHost)
+			if other.ListenHost == spec.ListenHost || left != nil && left.IsUnspecified() || right != nil && right.IsUnspecified() || left != nil && right != nil && left.Equal(right) {
+				return nil, fmt.Errorf("%s/%d уже используется правилами %q и %q", spec.Protocol, spec.ListenPort, other.Name, spec.Name)
+			}
+		}
+		normalized[i] = spec
+	}
+	return normalized, nil
+}
+
+// ReplaceSpecs atomically validates the profile and rolls the previous rules
+// back if a listener cannot be started after the swap.
+func (m *Manager) ReplaceSpecs(specs []RuleSpec) error {
+	normalized, err := NormalizeRuleSet(specs)
+	if err != nil {
+		return err
+	}
+	m.opMu.Lock()
+	old := m.Specs()
+	replace := func(next []RuleSpec) error {
+		for _, rule := range m.List() {
+			rule.Stop()
+		}
+		m.mu.Lock()
+		m.rules = make(map[string]*Rule)
+		m.order = nil
+		m.mu.Unlock()
+		for _, spec := range next {
+			if _, addErr := m.addLocked(spec); addErr != nil {
+				return addErr
+			}
+		}
+		return nil
+	}
+	if err = replace(normalized); err != nil {
+		failure := err
+		if rollbackErr := replace(old); rollbackErr != nil {
+			err = fmt.Errorf("импорт: %v; откат: %w", failure, rollbackErr)
+		} else {
+			err = failure
+		}
+	}
+	m.opMu.Unlock()
+	m.notify()
+	return err
 }
 
 func (m *Manager) StopAll() {

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -91,5 +93,34 @@ func TestLoadRejectsBrokenConfigWithoutOverwriting(t *testing.T) {
 	got, err := os.ReadFile(path)
 	if err != nil || string(got) != string(broken) {
 		t.Fatal("broken config was overwritten")
+	}
+}
+
+func TestLoadMigratesPreV1Config(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := []byte(`{
+		"web":{"addr":"127.0.0.1:8420","token":"legacy"},
+		"rules":[{"id":"old","listen_host":"127.0.0.1","listen_port":17010,"target":{"host":"127.0.0.1","port":17011}}]
+	}`)
+	if err := os.WriteFile(path, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SchemaVersion != 1 || !cfg.Detection.Enabled || !cfg.Detection.Builtins {
+		t.Fatalf("v1 defaults were not applied: %+v", cfg)
+	}
+	if got := cfg.Rules[0]; got.Protocol != "" {
+		t.Fatalf("legacy rule should remain sparse on disk until runtime normalization: %+v", got)
+	}
+	profile := cfg.ProfileSnapshot("legacy")
+	profileJSON, err := json.Marshal(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.SchemaVersion != 1 || profile.Name != "legacy" || bytes.Contains(profileJSON, []byte(`"token"`)) {
+		t.Fatalf("unsafe or invalid profile: %+v", profile)
 	}
 }

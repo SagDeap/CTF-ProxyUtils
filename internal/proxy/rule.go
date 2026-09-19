@@ -29,6 +29,7 @@ type Rule struct {
 	spec         RuleSpec
 	acl          []*net.IPNet
 	ln           net.Listener
+	pc           net.PacketConn
 	running      bool
 	lastErr      string
 	ctx          context.Context
@@ -37,6 +38,7 @@ type Rule struct {
 	wg           sync.WaitGroup
 	healthWG     sync.WaitGroup
 	conns        map[uint64]net.Conn
+	udpSessions  map[string]*udpSession
 	dialContext  func(context.Context, string, string) (net.Conn, error)
 
 	targetUp           bool
@@ -49,8 +51,11 @@ type Rule struct {
 	lastCheck          time.Time
 	lastFailureEvent   time.Time
 	suppressedFailures int
+	targetHealth       HealthResult
+	backupHealth       HealthResult
 	event              func(ruleID, ruleName, kind, message string)
 	rec                *Recorder
+	detector           *DetectorEngine
 }
 
 func newRule(spec RuleSpec) (*Rule, error) {
@@ -64,7 +69,7 @@ func newRule(spec RuleSpec) (*Rule, error) {
 		return nil, err
 	}
 	r := &Rule{
-		spec: spec, acl: acl, conns: make(map[uint64]net.Conn),
+		spec: spec, acl: acl, conns: make(map[uint64]net.Conn), udpSessions: make(map[string]*udpSession),
 		rec:      NewRecorder(spec.Dump.MaxConns, spec.Dump.MaxBytesPer),
 		targetUp: true, backupUp: true,
 		dialContext: (&net.Dialer{}).DialContext,
@@ -111,20 +116,52 @@ func (r *Rule) Start() error {
 }
 
 // startLocked accepts an already bound listener for transactional updates.
-func (r *Rule) startLocked(ln net.Listener) error {
+type boundSocket struct {
+	ln net.Listener
+	pc net.PacketConn
+}
+
+func (b *boundSocket) Close() {
+	if b == nil {
+		return
+	}
+	if b.ln != nil {
+		b.ln.Close()
+	}
+	if b.pc != nil {
+		b.pc.Close()
+	}
+}
+
+func bindRuleSocket(spec RuleSpec) (*boundSocket, error) {
+	if spec.Protocol == "udp" {
+		pc, err := net.ListenPacket("udp", spec.ListenAddr())
+		if err != nil {
+			return nil, err
+		}
+		return &boundSocket{pc: pc}, nil
+	}
+	ln, err := net.Listen("tcp", spec.ListenAddr())
+	if err != nil {
+		return nil, err
+	}
+	return &boundSocket{ln: ln}, nil
+}
+
+func (r *Rule) startLocked(bound *boundSocket) error {
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
-		if ln != nil {
-			ln.Close()
+		if bound != nil {
+			bound.Close()
 		}
 		return nil
 	}
 	spec := r.spec.Clone()
 	r.mu.Unlock()
-	if ln == nil {
+	if bound == nil {
 		var err error
-		ln, err = net.Listen("tcp", spec.ListenAddr())
+		bound, err = bindRuleSocket(spec)
 		if err != nil {
 			r.mu.Lock()
 			r.lastErr = err.Error()
@@ -135,12 +172,16 @@ func (r *Rule) startLocked(ln net.Listener) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
-	r.ln, r.ctx, r.cancel = ln, ctx, cancel
+	r.ln, r.pc, r.ctx, r.cancel = bound.ln, bound.pc, ctx, cancel
 	r.running, r.lastErr = true, ""
 	r.emitLocked("started", "Проброс запущен: "+spec.ListenAddr())
 	r.mu.Unlock()
 	r.wg.Add(1)
-	go r.acceptLoop(ln, ctx)
+	if spec.Protocol == "udp" {
+		go r.udpLoop(bound.pc, ctx)
+	} else {
+		go r.acceptLoop(bound.ln, ctx)
+	}
 	r.startHealthLocked()
 	return nil
 }
@@ -158,17 +199,29 @@ func (r *Rule) stopLocked() {
 		return
 	}
 	r.running = false
-	ln, cancel := r.ln, r.cancel
-	r.ln, r.cancel = nil, nil
+	ln, pc, cancel := r.ln, r.pc, r.cancel
+	r.ln, r.pc, r.cancel = nil, nil, nil
 	conns := make([]net.Conn, 0, len(r.conns))
 	for _, conn := range r.conns {
 		conns = append(conns, conn)
 	}
+	sessions := make([]*udpSession, 0, len(r.udpSessions))
+	for _, session := range r.udpSessions {
+		sessions = append(sessions, session)
+	}
 	r.mu.Unlock()
 	cancel() // also interrupts DNS, pending dials and health probes
-	ln.Close()
+	if ln != nil {
+		ln.Close()
+	}
+	if pc != nil {
+		pc.Close()
+	}
 	for _, conn := range conns {
 		conn.Close()
+	}
+	for _, session := range sessions {
+		session.close()
 	}
 	r.stopHealthLocked()
 	r.wg.Wait()
@@ -287,8 +340,19 @@ func (r *Rule) handle(client net.Conn, ctx context.Context) {
 	r.noteEndpointProbe(!viaBackup, target, true)
 	atomic.AddInt64(&r.totalConns, 1)
 	var writer *connWriter
-	if spec.Dump.Enabled {
-		writer = r.rec.Begin(id, client.RemoteAddr().String(), target.Addr())
+	if spec.Dump.Enabled || spec.Inspect.Enabled {
+		writer = r.rec.BeginProtocol(id, client.RemoteAddr().String(), target.Addr(), "tcp")
+	}
+	if spec.Inspect.Enabled && r.detector != nil {
+		if writer == nil {
+			writer = &connWriter{}
+		}
+		remote, targetAddr, ruleID, ruleName := client.RemoteAddr().String(), target.Addr(), spec.ID, spec.Name
+		r.detector.Begin(ruleID, ruleName, id, remote, targetAddr, "tcp", spec.Inspect.AutoPin)
+		writer.observe = func(direction string, data []byte) {
+			r.detector.Observe(ruleID, ruleName, id, remote, targetAddr, "tcp", direction, data, spec.Inspect.AutoPin)
+		}
+		writer.onFinish = func() { r.detector.End(ruleID, id) }
 	}
 	done := make(chan struct{})
 	defer close(done)
@@ -308,7 +372,9 @@ func (r *Rule) handle(client net.Conn, ctx context.Context) {
 	go func() { defer pipes.Done(); in = r.pipe(upstream, client, DirIn, writer, stream, &r.bytesIn) }()
 	go func() { defer pipes.Done(); out = r.pipe(client, upstream, DirOut, writer, stream, &r.bytesOut) }()
 	pipes.Wait()
-	writer.Finish(in, out)
+	if writer != nil {
+		writer.Finish(in, out)
+	}
 }
 
 type relay struct {
@@ -374,27 +440,44 @@ func (r *Rule) pipe(dst, src net.Conn, dir string, writer *connWriter, stream *r
 }
 
 type Snapshot struct {
-	Spec        RuleSpec  `json:"spec"`
-	Running     bool      `json:"running"`
-	LastError   string    `json:"last_error,omitempty"`
-	ActiveConns int64     `json:"active_conns"`
-	TotalConns  int64     `json:"total_conns"`
-	FailedConns int64     `json:"failed_conns"`
-	DeniedConns int64     `json:"denied_conns"`
-	BytesIn     int64     `json:"bytes_in"`
-	BytesOut    int64     `json:"bytes_out"`
-	LastActive  int64     `json:"last_active_unix_ms"`
-	TargetUp    bool      `json:"target_up"`
-	BackupUp    bool      `json:"backup_up"`
-	UsingBackup bool      `json:"using_backup"`
-	LastCheck   time.Time `json:"last_check,omitempty"`
-	DumpCount   int       `json:"dump_count"`
+	Spec         RuleSpec      `json:"spec"`
+	Running      bool          `json:"running"`
+	LastError    string        `json:"last_error,omitempty"`
+	ActiveConns  int64         `json:"active_conns"`
+	TotalConns   int64         `json:"total_conns"`
+	FailedConns  int64         `json:"failed_conns"`
+	DeniedConns  int64         `json:"denied_conns"`
+	BytesIn      int64         `json:"bytes_in"`
+	BytesOut     int64         `json:"bytes_out"`
+	LastActive   int64         `json:"last_active_unix_ms"`
+	TargetUp     bool          `json:"target_up"`
+	BackupUp     bool          `json:"backup_up"`
+	UsingBackup  bool          `json:"using_backup"`
+	LastCheck    time.Time     `json:"last_check,omitempty"`
+	DumpCount    int           `json:"dump_count"`
+	TargetHealth *HealthResult `json:"target_health,omitempty"`
+	BackupHealth *HealthResult `json:"backup_health,omitempty"`
+}
+
+type HealthResult struct {
+	At        time.Time `json:"at,omitempty"`
+	OK        bool      `json:"ok"`
+	LatencyMS int64     `json:"latency_ms"`
+	Error     string    `json:"error,omitempty"`
 }
 
 func (r *Rule) Snapshot() Snapshot {
 	r.mu.RLock()
 	s := Snapshot{Spec: r.spec.Clone(), Running: r.running, LastError: r.lastErr,
 		TargetUp: r.targetUp, BackupUp: r.backupUp, UsingBackup: r.usingBackup, LastCheck: r.lastCheck}
+	if !r.targetHealth.At.IsZero() {
+		health := r.targetHealth
+		s.TargetHealth = &health
+	}
+	if !r.backupHealth.At.IsZero() {
+		health := r.backupHealth
+		s.BackupHealth = &health
+	}
 	r.mu.RUnlock()
 	s.ActiveConns = atomic.LoadInt64(&r.activeConns)
 	s.TotalConns = atomic.LoadInt64(&r.totalConns)
