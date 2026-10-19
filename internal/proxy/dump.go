@@ -47,6 +47,7 @@ type ConnDump struct {
 // DumpQuery searches captured stream prefixes independently in each direction.
 // From and To include connections started at either boundary; Remote is a
 // substring of the client address. Limit defaults to 100 and cannot exceed 500.
+// Pinned captures come first; each group is ordered newest first.
 type DumpQuery struct {
 	Query      string
 	Mode       string
@@ -325,6 +326,8 @@ func (r *Recorder) Search(q DumpQuery) (DumpPage, error) {
 	r.mu.Lock()
 	candidates := append([]*recordedConn(nil), r.dumps...)
 	r.mu.Unlock()
+	// Pins are collected separately so pagination never pushes them off page one.
+	var pinned, rest []*ConnDump
 	for i := len(candidates) - 1; i >= 0; i-- {
 		d := candidates[i]
 		r.mu.Lock()
@@ -358,10 +361,20 @@ func (r *Recorder) Search(q DumpQuery) (DumpPage, error) {
 				continue
 			}
 		}
-		if page.Total >= q.Offset && len(page.Items) < q.Limit {
-			page.Items = append(page.Items, summary)
+		if summary.Pinned {
+			pinned = append(pinned, summary)
+		} else {
+			rest = append(rest, summary)
 		}
-		page.Total++
+	}
+	matches := append(pinned, rest...)
+	page.Total = len(matches)
+	if q.Offset < len(matches) {
+		end := q.Offset + q.Limit
+		if end > len(matches) {
+			end = len(matches)
+		}
+		page.Items = append(page.Items, matches[q.Offset:end]...)
 	}
 	return page, nil
 }

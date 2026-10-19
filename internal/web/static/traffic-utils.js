@@ -70,7 +70,42 @@
     return { paths, max, start, end };
   }
 
-  const exported = { escapeHTML, decodeBytes, joinStream, buildSearch, parseHeaderLines, chartSeries };
+  function fmtBytes(n) {
+    if (!n) return '0 B';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+  }
+
+  // bytesToText показывает полезную нагрузку как текст, заменяя непечатаемое.
+  function bytesToText(bytes) {
+    return new TextDecoder('utf-8').decode(bytes).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '.');
+  }
+
+  // hexdump рисует классические 16 байт в строке: смещение, hex, ASCII.
+  function hexdump(bytes) {
+    const lines = [];
+    for (let off = 0; off < bytes.length; off += 16) {
+      const slice = bytes.subarray(off, off + 16);
+      let hex = '';
+      let asc = '';
+      for (let i = 0; i < 16; i++) {
+        hex += i < slice.length ? slice[i].toString(16).padStart(2, '0') + ' ' : '   ';
+        if (i === 7) hex += ' ';
+        if (i < slice.length) {
+          const b = slice[i];
+          asc += (b >= 32 && b < 127) ? String.fromCharCode(b) : '.';
+        }
+      }
+      lines.push(
+        `<span class="off">${off.toString(16).padStart(8, '0')}</span>  ${hex} <span class="asc">${escapeHTML(asc)}</span>`
+      );
+    }
+    return lines.join('\n');
+  }
+
+  const exported = { escapeHTML, decodeBytes, joinStream, buildSearch, parseHeaderLines, chartSeries, fmtBytes, bytesToText, hexdump };
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   else root.TrafficUtils = exported;
 })(typeof globalThis === 'undefined' ? this : globalThis);

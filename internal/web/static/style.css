@@ -322,6 +322,10 @@ input[type=datetime-local] { color-scheme: dark; }
 .chunk-head.in { color: var(--warn); }
 .chunk-head.out { color: var(--info); }
 .hexdump { margin: 0; padding: 10px 11px; overflow-x: auto; border: 1px solid var(--border); border-radius: 9px; background: rgba(2,5,10,.72); color: var(--text); white-space: pre; font: 11px/1.5 var(--mono); }
+/* A 64 KiB capture is thousands of lines: each stream scrolls inside its own box. */
+.traffic-content .hexdump { max-height: min(22rem, 38vh); overflow: auto; }
+.chunk-list { max-height: min(40rem, 70vh); overflow-y: auto; padding-right: 4px; }
+.chunk-list .hexdump { max-height: none; }
 .hexdump .off { color: var(--dim); }
 .hexdump .asc { color: var(--accent); }
 .view-toggle { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 11px; }
