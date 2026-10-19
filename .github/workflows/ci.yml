@@ -1,12 +1,18 @@
 name: Проверки
 
+# push запускается только для main: ветки с PR проверяет pull_request, без дублей.
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
+
+# Новый push в PR отменяет устаревший прогон; прогоны main доходят до конца.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -20,6 +26,16 @@ jobs:
         with:
           go-version: '1.27.x'
           cache: false
+      # На Windows checkout переводит строки в CRLF, и gofmt счёл бы грязным каждый файл.
+      - name: gofmt
+        if: runner.os == 'Linux'
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::Файлы не отформатированы, выполни gofmt -w:"
+            echo "$unformatted"
+            exit 1
+          fi
       - run: go vet ./...
       - run: go test ./...
       - name: Race detector
@@ -29,3 +45,18 @@ jobs:
       - name: 32-bit tests
         if: runner.os == 'Linux'
         run: GOARCH=386 CGO_ENABLED=0 go test ./...
+
+  # Те же цели, что собирает релиз: поломка под macOS или ARM видна до тега.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+      - name: Кросс-сборка всех платформ
+        run: |
+          make dist VERSION=ci
+          test "$(dist/ctf-proxyutils-linux-amd64 -version)" = "ctf-proxyutils ci"
+          cd dist && sha256sum -c checksums.txt
