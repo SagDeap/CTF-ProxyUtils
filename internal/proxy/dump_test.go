@@ -83,12 +83,13 @@ func TestRecorderSearchFiltersAndPagination(t *testing.T) {
 	if err := rec.SetPinned(3, true); err != nil {
 		t.Fatal(err)
 	}
+	// Client 10.0.0.2 owns IDs 5, 3 and 1; pinned ID 3 is listed first.
 	page, err := rec.Search(DumpQuery{Remote: "10.0.0.2", Offset: 1, Limit: 1})
-	if err != nil || page.Total != 3 || len(page.Items) != 1 || page.Items[0].ID != 3 {
+	if err != nil || page.Total != 3 || len(page.Items) != 1 || page.Items[0].ID != 5 {
 		t.Fatalf("filtered page = %+v, %v", page, err)
 	}
 	page, err = rec.Search(DumpQuery{From: base.Add(2 * time.Second), To: base.Add(4 * time.Second)})
-	if err != nil || page.Total != 3 || len(page.Items) != 3 || page.Items[0].ID != 4 || page.Items[2].ID != 2 {
+	if err != nil || page.Total != 3 || len(page.Items) != 3 || page.Items[0].ID != 3 || page.Items[1].ID != 4 || page.Items[2].ID != 2 {
 		t.Fatalf("inclusive date range = %+v, %v", page, err)
 	}
 	page, err = rec.Search(DumpQuery{PinnedOnly: true})
@@ -102,6 +103,78 @@ func TestRecorderSearchFiltersAndPagination(t *testing.T) {
 	page, err = rec.Search(DumpQuery{Remote: "missing"})
 	if err != nil || page.Total != 0 || len(page.Items) != 0 {
 		t.Fatalf("missing client = %+v, %v", page, err)
+	}
+}
+
+func searchIDs(t *testing.T, rec *Recorder, q DumpQuery) ([]uint64, int) {
+	t.Helper()
+	page, err := rec.Search(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]uint64, len(page.Items))
+	for i, item := range page.Items {
+		ids[i] = item.ID
+	}
+	return ids, page.Total
+}
+
+func TestRecorderSearchListsPinnedFirst(t *testing.T) {
+	rec := NewRecorder(10, 64)
+	for i := uint64(1); i <= 5; i++ {
+		w := rec.Begin(i, fmt.Sprintf("10.0.0.%d:80", i), "service:80")
+		w.Write(DirIn, []byte(fmt.Sprintf("request %d", i%2)))
+		w.Finish(9, 0)
+	}
+	for _, id := range []uint64{3, 4} {
+		if err := rec.SetPinned(id, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(name string, q DumpQuery, want []uint64, wantTotal int) {
+		t.Helper()
+		ids, total := searchIDs(t, rec, q)
+		if fmt.Sprint(ids) != fmt.Sprint(want) || total != wantTotal {
+			t.Fatalf("%s: got %v of %d, want %v of %d", name, ids, total, want, wantTotal)
+		}
+	}
+	check("all", DumpQuery{}, []uint64{4, 3, 5, 2, 1}, 5)
+	check("first page", DumpQuery{Limit: 2}, []uint64{4, 3}, 5)
+	check("second page", DumpQuery{Offset: 2, Limit: 2}, []uint64{5, 2}, 5)
+	check("last page", DumpQuery{Offset: 4, Limit: 2}, []uint64{1}, 5)
+	check("query keeps pin order", DumpQuery{Query: "request 1"}, []uint64{3, 5, 1}, 3)
+	check("pinned only", DumpQuery{PinnedOnly: true}, []uint64{4, 3}, 2)
+
+	if err := rec.SetPinned(4, false); err != nil {
+		t.Fatal(err)
+	}
+	check("unpinned record returns to its time slot", DumpQuery{}, []uint64{3, 5, 4, 2, 1}, 5)
+
+	// Detector auto-pin must surface the record the same way as a manual pin.
+	if err := rec.MarkFinding(1, 70, true); err != nil {
+		t.Fatal(err)
+	}
+	check("auto-pinned finding", DumpQuery{}, []uint64{3, 1, 5, 4, 2}, 5)
+	if err := rec.MarkFinding(5, 30, false); err != nil {
+		t.Fatal(err)
+	}
+	check("unpinned finding keeps order", DumpQuery{}, []uint64{3, 1, 5, 4, 2}, 5)
+}
+
+func TestRecorderMarkFindingKeepsHighestScore(t *testing.T) {
+	rec := NewRecorder(4, 64)
+	rec.Begin(7, "client", "target")
+	for _, score := range []int{40, 90, 10} {
+		if err := rec.MarkFinding(7, score, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, ok := rec.Get(7)
+	if !ok || got.Findings != 3 || got.RiskScore != 90 || got.Pinned {
+		t.Fatalf("finding metadata = %+v, %v", got, ok)
+	}
+	if err := rec.MarkFinding(8, 99, true); !errors.Is(err, ErrDumpNotFound) {
+		t.Fatalf("missing capture result = %v", err)
 	}
 }
 

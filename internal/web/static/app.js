@@ -24,7 +24,7 @@ let trafficTotal = 0;
 let trafficItems = [];
 const trafficDetails = new Map();
 const routingPending = new Set();
-const { joinStream, buildSearch, chartSeries } = TrafficUtils;
+const { joinStream, buildSearch, chartSeries, fmtBytes, bytesToText, hexdump } = TrafficUtils;
 
 /* ── Экранирование ────────────────────────────────────────────
    Баннеры сервисов, имена хостов и дампы трафика приходят с чужих
@@ -56,14 +56,6 @@ async function api(path, opts = {}) {
 }
 
 /* ── Форматирование ──────────────────────────────────────────── */
-function fmtBytes(n) {
-  if (!n) return '0 B';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
-}
-
 function fmtAgo(ms) {
   if (!ms) return '—';
   const d = Math.floor((Date.now() - ms) / 1000);
@@ -790,7 +782,7 @@ function connCard(c) {
 }
 
 function trafficContent(detail) {
-  if (trafficLayout === 'chunks') return (detail.chunks || []).map(chunkBlock).join('') || '<p class="dim">Пусто</p>';
+  if (trafficLayout === 'chunks') return `<div class="chunk-list">${(detail.chunks || []).map(chunkBlock).join('') || '<p class="dim">Пусто</p>'}</div>`;
   return ['in', 'out'].map((dir) => {
     const bytes = joinStream(detail.chunks, dir);
     const content = trafficView === 'hex' ? hexdump(bytes) : esc(bytesToText(bytes));
@@ -811,33 +803,6 @@ function chunkBlock(ch) {
 
 function b64ToBytes(b64) {
   return TrafficUtils.decodeBytes(b64);
-}
-
-// bytesToText показывает полезную нагрузку как текст, заменяя непечатаемое.
-function bytesToText(bytes) {
-  return new TextDecoder('utf-8').decode(bytes).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '.');
-}
-
-// hexdump рисует классические 16 байт в строке: смещение, hex, ASCII.
-function hexdump(bytes) {
-  const lines = [];
-  for (let off = 0; off < bytes.length; off += 16) {
-    const slice = bytes.subarray(off, off + 16);
-    let hex = '';
-    let asc = '';
-    for (let i = 0; i < 16; i++) {
-      hex += i < slice.length ? slice[i].toString(16).padStart(2, '0') + ' ' : '   ';
-      if (i === 7) hex += ' ';
-      if (i < slice.length) {
-        const b = slice[i];
-        asc += (b >= 32 && b < 127) ? String.fromCharCode(b) : '.';
-      }
-    }
-    lines.push(
-      `<span class="off">${off.toString(16).padStart(8, '0')}</span>  ${hex} <span class="asc">${esc(asc)}</span>`
-    );
-  }
-  return lines.join('\n');
 }
 
 $('traffic-rule').addEventListener('change', resetTraffic);
@@ -887,7 +852,11 @@ $('traffic-list').addEventListener('click', async (e) => {
       if ($('traffic-rule').value !== ruleID) return;
       item.pinned = pinned;
       if (trafficDetails.has(cid)) trafficDetails.get(cid).pinned = pinned;
-      loadTraffic();
+      await loadTraffic();
+      // Pins are listed first, so the card may have moved and dropped focus.
+      btn.disabled = false;
+      if (btn.isConnected && (!document.activeElement || document.activeElement === document.body)) btn.focus({ preventScroll: true });
+      if (pinned) toast('Запись закреплена и перенесена в начало списка', 'ok');
     } else if (btn.dataset.export) {
       const cid = btn.dataset.export;
       const detail = trafficDetails.get(cid);
@@ -946,7 +915,7 @@ function renderFindings() {
     <div class="finding-content"><div class="finding-head"><b>${esc(finding.rule_name || finding.rule_id)}</b><span class="tag ${finding.severity === 'critical' || finding.severity === 'high' ? 'down' : 'warn'}">${esc(severityLabel(finding.severity))}</span><span class="tag">${esc((finding.protocol || 'tcp').toUpperCase())}</span>${finding.auto_pinned ? '<span class="tag warn">закреплено</span>' : ''}</div>
     <div class="finding-meta">${esc(finding.remote_addr)} → ${esc(finding.target)} · ${fmtTime(finding.at)}</div>
     <div class="finding-signals">${(finding.signals || []).map((signal) => `<div><b>+${signal.score} ${esc(signal.detector_name)}</b>${signal.excerpt ? `<code>${esc(signal.excerpt)}</code>` : ''}</div>`).join('')}</div></div>
-    <button class="btn btn-sm btn-ghost" data-finding-traffic="${esc(finding.rule_id)}" data-connection="${esc(finding.connection_id)}">Открыть запись</button>
+    <button class="btn btn-sm btn-ghost" data-finding-traffic="${esc(finding.rule_id)}" data-connection="${esc(finding.connection_id)}" data-remote="${esc(finding.remote_addr)}">Открыть запись</button>
   </article>`).join('');
   renderDetectors();
 }
@@ -977,11 +946,17 @@ $('btn-findings-clear').addEventListener('click', async () => {
 $('findings-list').addEventListener('click', (event) => {
   const button = event.target.closest('[data-finding-traffic]');
   if (!button) return;
-  document.querySelector('.tab[data-tab="traffic"]').click();
+  // Filter by the client address and port so the record is found on any page.
+  for (const id of ['traffic-query', 'traffic-from', 'traffic-to']) $(id).value = '';
+  $('traffic-mode').value = 'text';
+  $('traffic-dir').value = 'any';
+  $('traffic-pinned').checked = false;
+  $('traffic-remote').value = button.dataset.remote;
   $('traffic-rule').value = button.dataset.findingTraffic;
-  expandedConns.clear();
-  expandedConns.add(button.dataset.connection);
   resetTraffic();
+  // resetTraffic clears expanded records, so expand only after it.
+  expandedConns.add(button.dataset.connection);
+  document.querySelector('.tab[data-tab="traffic"]').click();
 });
 
 $('btn-detector-settings').addEventListener('click', async () => {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -78,6 +79,60 @@ func TestConcurrentScanRuleAndDiskUpdates(t *testing.T) {
 	}
 	if loaded.Scan.Ports != "12" || len(loaded.Rules) != 1 || loaded.Rules[0].ID != "11" {
 		t.Fatalf("updates lost: %#v", loaded)
+	}
+}
+
+func TestDetectionSettingsPersistAndValidate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detection := proxy.DefaultDetectionConfig()
+	detection.Threshold = 40
+	detection.MaxFindings = 0 // filled in by defaults
+	detection.Detectors = []proxy.DetectorSpec{{ID: "flag", Name: "Flag", Enabled: true, Mode: "regex", Pattern: `FLAG\{\w+\}`,
+		Direction: "out", Scope: "stream", Score: 90, Sensitive: true, RuleIDs: []string{"svc"}}}
+	if err := cfg.SetDetection(detection); err != nil {
+		t.Fatal(err)
+	}
+	detection.Detectors[0].RuleIDs[0] = "mutated"
+	cfg.DetectionSnapshot().Detectors[0].RuleIDs[0] = "mutated"
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.DetectionSnapshot()
+	if got.Threshold != 40 || got.MaxFindings != 500 || len(got.Detectors) != 1 || got.Detectors[0].RuleIDs[0] != "svc" || !got.Detectors[0].Sensitive {
+		t.Fatalf("detection settings were not persisted independently: %+v", got)
+	}
+
+	for _, broken := range []proxy.DetectionConfig{
+		{Enabled: true, Threshold: 101},
+		{Enabled: true, Detectors: []proxy.DetectorSpec{{ID: "a", Mode: "regex", Pattern: "["}}},
+		{Enabled: true, Detectors: []proxy.DetectorSpec{{ID: "a", Pattern: "x"}, {ID: "a", Pattern: "y"}}},
+	} {
+		if err := cfg.SetDetection(broken); err == nil {
+			t.Errorf("invalid detection settings accepted: %+v", broken)
+		}
+	}
+	if reloaded, err := Load(path); err != nil || reloaded.Detection.Threshold != 40 {
+		t.Fatalf("rejected settings reached the disk: %+v, %v", reloaded, err)
+	}
+}
+
+func TestGenerateTokenIsRandomAndURLSafe(t *testing.T) {
+	seen := make(map[string]bool)
+	for i := 0; i < 32; i++ {
+		token, err := GenerateToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(token) != 24 || strings.ContainsAny(token, "+/=") || seen[token] {
+			t.Fatalf("weak or repeated token %q", token)
+		}
+		seen[token] = true
 	}
 }
 
